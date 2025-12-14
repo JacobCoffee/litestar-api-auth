@@ -10,6 +10,7 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from litestar_api_auth.backends.base import APIKeyBackend, APIKeyInfo
 
@@ -141,7 +142,7 @@ class MemoryBackend(APIKeyBackend):
             info = self._store.get(key_hash)
             return deepcopy(info) if info else None
 
-    async def update(self, key_hash: str, **updates: dict[str, object]) -> APIKeyInfo | None:
+    async def update(self, key_hash: str, **updates: Any) -> APIKeyInfo | None:
         """Update an API key's metadata.
 
         Args:
@@ -157,19 +158,17 @@ class MemoryBackend(APIKeyBackend):
                 return None
 
             # Create updated info with new values
-            updated_data = {
-                "key_id": info.key_id,
-                "key_hash": info.key_hash,
-                "name": updates.get("name", info.name),
-                "scopes": updates.get("scopes", info.scopes),
-                "is_active": updates.get("is_active", info.is_active),
-                "created_at": info.created_at,
-                "expires_at": updates.get("expires_at", info.expires_at),
-                "last_used_at": updates.get("last_used_at", info.last_used_at),
-                "metadata": updates.get("metadata", info.metadata),
-            }
-
-            updated_info = APIKeyInfo(**updated_data)
+            updated_info = APIKeyInfo(
+                key_id=info.key_id,
+                key_hash=info.key_hash,
+                name=updates.get("name", info.name),  # type: ignore[arg-type]
+                scopes=updates.get("scopes", info.scopes),  # type: ignore[arg-type]
+                is_active=updates.get("is_active", info.is_active),  # type: ignore[arg-type]
+                created_at=info.created_at,
+                expires_at=updates.get("expires_at", info.expires_at),  # type: ignore[arg-type]
+                last_used_at=updates.get("last_used_at", info.last_used_at),  # type: ignore[arg-type]
+                metadata=updates.get("metadata", info.metadata),  # type: ignore[arg-type]
+            )
             self._store[key_hash] = deepcopy(updated_info)
 
             return deepcopy(updated_info)

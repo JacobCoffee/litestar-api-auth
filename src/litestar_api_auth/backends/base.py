@@ -131,7 +131,7 @@ class APIKeyBackend(Protocol):
         """
         ...
 
-    async def update(self, key_hash: str, **updates: dict[str, object]) -> APIKeyInfo | None:
+    async def update(self, key_hash: str, **updates: Any) -> APIKeyInfo | None:
         """Update an API key's metadata.
 
         Args:
