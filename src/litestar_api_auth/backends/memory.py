@@ -208,10 +208,11 @@ class MemoryBackend(APIKeyBackend):
             List of APIKeyInfo objects sorted by creation date (newest first)
         """
         async with self._lock:
-            # Sort by created_at descending (newest first)
+            # Sort by created_at descending (newest first), then by key_id descending for stability
+            # when timestamps are identical (common on Windows due to lower timer resolution)
             sorted_keys = sorted(
                 self._store.values(),
-                key=lambda k: k.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                key=lambda k: (k.created_at or datetime.min.replace(tzinfo=timezone.utc), k.key_id),
                 reverse=True,
             )
 
