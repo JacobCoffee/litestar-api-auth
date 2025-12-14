@@ -189,7 +189,7 @@ class TestVerifyAPIKey:
         While we can't directly test timing, we can verify that the function
         uses hmac.compare_digest by checking it handles various input lengths.
         """
-        raw_key, hashed_key = generate_api_key()
+        _raw_key, hashed_key = generate_api_key()
 
         # All of these should return False without raising exceptions
         assert verify_api_key("short", hashed_key) is False

@@ -44,7 +44,7 @@ def test_api_key(backend: MemoryBackend) -> tuple[str, str, APIKeyInfo]:
 @pytest.fixture
 async def seeded_backend(backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> MemoryBackend:
     """Create a backend with a pre-seeded API key."""
-    raw_key, hashed_key, key_info = test_api_key
+    _raw_key, hashed_key, key_info = test_api_key
     await backend.create(hashed_key, key_info)
     return backend
 

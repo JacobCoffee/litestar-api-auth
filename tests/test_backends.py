@@ -21,7 +21,7 @@ class TestMemoryBackendCreate:
     @pytest.mark.asyncio
     async def test_memory_backend_create(self, memory_backend: MemoryBackend) -> None:
         """Test creating a new API key in memory backend."""
-        raw_key, hashed_key = generate_api_key("test_")
+        _raw_key, hashed_key = generate_api_key("test_")
 
         key_info = APIKeyInfo(
             key_id="test-123",
@@ -69,8 +69,8 @@ class TestMemoryBackendCreate:
     @pytest.mark.asyncio
     async def test_memory_backend_create_duplicate_id(self, memory_backend: MemoryBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
-        raw_key1, hashed_key1 = generate_api_key("test_")
-        raw_key2, hashed_key2 = generate_api_key("test_")
+        _raw_key1, hashed_key1 = generate_api_key("test_")
+        _raw_key2, hashed_key2 = generate_api_key("test_")
 
         key_info = APIKeyInfo(
             key_id="duplicate-id",
@@ -604,7 +604,7 @@ class TestMemoryBackendIntegration:
     async def test_complete_key_lifecycle(self, memory_backend: MemoryBackend) -> None:
         """Test complete lifecycle of an API key."""
         # Generate key
-        raw_key, hashed_key = generate_api_key("app_")
+        _raw_key, hashed_key = generate_api_key("app_")
 
         # Create key
         key_info = APIKeyInfo(
