@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Litestar Documentation
+    url: https://docs.litestar.dev/
+    about: Official Litestar documentation - please check here before opening an issue.
+  - name: Litestar API Auth Documentation
+    url: https://github.com/JacobCoffee/litestar-api-auth#readme
+    about: Documentation for litestar-api-auth
+  - name: Discord
+    url: https://discord.gg/litestar
+    about: Join the Litestar Discord community to chat or get in touch with the maintainers.

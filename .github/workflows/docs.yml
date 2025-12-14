@@ -1,0 +1,41 @@
+name: Documentation
+
+on:
+  release:
+    types: [published]
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  docs:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Build documentation
+        run: uv run make docs
+
+      - name: Deploy to GitHub Pages
+        if: github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: docs/_build/html
+          single-commit: true

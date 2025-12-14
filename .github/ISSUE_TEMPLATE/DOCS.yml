@@ -1,0 +1,41 @@
+name: "Documentation Update"
+description: Create an issue for documentation changes
+title: "Docs: <title>"
+labels:
+  - "Documentation"
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary"
+      description: Provide a brief summary of the documentation change
+      placeholder: Describe in a few lines what documentation needs to be added, updated, or corrected
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_state
+    attributes:
+      label: "Current State"
+      description: Describe the current state of the documentation, if applicable
+      placeholder: What does the documentation currently say or what is missing?
+    validations:
+      required: false
+
+  - type: textarea
+    id: proposed_change
+    attributes:
+      label: "Proposed Change"
+      description: Describe the proposed documentation change
+      placeholder: What should the documentation say instead?
+    validations:
+      required: false
+
+  - type: input
+    id: doc_url
+    attributes:
+      label: "Documentation URL"
+      description: Link to the relevant documentation page, if applicable
+      placeholder: ex. https://litestar-api-auth.readthedocs.io/...
+    validations:
+      required: false
