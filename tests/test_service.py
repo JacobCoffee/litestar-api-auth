@@ -167,8 +167,10 @@ class TestVerifyAPIKey:
         """Test that tampered hash fails verification."""
         raw_key, hashed_key = api_key_pair
 
-        # Tamper with the hash by changing one character
-        tampered_hash = "0" + hashed_key[1:]
+        # Tamper with the hash by changing first character to something different
+        first_char = hashed_key[0]
+        tampered_char = "1" if first_char != "1" else "2"
+        tampered_hash = tampered_char + hashed_key[1:]
 
         assert verify_api_key(raw_key, tampered_hash) is False
 
