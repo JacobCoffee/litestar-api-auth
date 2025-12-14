@@ -45,8 +45,8 @@ class APIKeyController(Controller):
         ... )
     """
 
-    path: ClassVar[str] = "/api-keys"
-    tags: ClassVar[list[str]] = ["API Keys"]
+    path: ClassVar[str] = "/api-keys"  # type: ignore[misc]
+    tags: ClassVar[list[str]] = ["API Keys"]  # type: ignore[misc]
 
     @post(
         "/",

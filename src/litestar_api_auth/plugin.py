@@ -206,7 +206,7 @@ class APIAuthPlugin(InitPluginProtocol):
 
         # Create a dynamic controller class with the correct path
         class ConfiguredAPIKeyController(APIKeyController):
-            path = self.config.route_prefix
+            path = self.config.route_prefix  # type: ignore[misc]
 
         # Store backend reference for dependency injection
         from litestar.di import Provide
@@ -254,7 +254,7 @@ class APIAuthPlugin(InitPluginProtocol):
                         await result
                 else:
                     for hook in original_on_startup:
-                        result = hook(app)
+                        result = hook(app)  # type: ignore[call-arg]
                         if hasattr(result, "__await__"):
                             await result
 
@@ -272,7 +272,7 @@ class APIAuthPlugin(InitPluginProtocol):
                         await result
                 else:
                     for hook in original_on_shutdown:
-                        result = hook(app)
+                        result = hook(app)  # type: ignore[call-arg]
                         if hasattr(result, "__await__"):
                             await result
 
@@ -308,10 +308,11 @@ class APIAuthPlugin(InitPluginProtocol):
 
         # Add to components
         if openapi_config.components is None:
-            openapi_config.components = []
-
+            openapi_config.components = Components(
+                security_schemes={"APIKeyAuth": security_scheme},
+            )
         # Check if components is a list or Components object
-        if isinstance(openapi_config.components, list):
+        elif isinstance(openapi_config.components, list):
             openapi_config.components.append(
                 Components(
                     security_schemes={"APIKeyAuth": security_scheme},
