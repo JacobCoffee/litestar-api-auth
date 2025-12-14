@@ -85,7 +85,7 @@ class RedisBackend:
         try:
             from redis.asyncio import Redis
         except ImportError as exc:
-            msg = "redis-py is required for RedisBackend. " "Install it with: pip install litestar-api-auth[redis]"
+            msg = "redis-py is required for RedisBackend. Install it with: pip install litestar-api-auth[redis]"
             raise ImportError(msg) from exc
 
         self.config = config or RedisConfig()

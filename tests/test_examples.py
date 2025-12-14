@@ -114,6 +114,6 @@ class TestExamplesContent:
 
             # Should import from litestar_api_auth, not internal modules
             # (except for specific allowed imports like backends.base)
-            assert (
-                "from litestar_api_auth import" in content or "from litestar_api_auth." in content
-            ), f"Example {script_path.name} should import from litestar_api_auth"
+            assert "from litestar_api_auth import" in content or "from litestar_api_auth." in content, (
+                f"Example {script_path.name} should import from litestar_api_auth"
+            )

@@ -59,8 +59,7 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
 
     if api_key is None:
         raise NotAuthorizedException(
-            detail="No API key found in request. "
-            "Ensure APIKeyMiddleware is configured and a valid API key is provided."
+            detail="No API key found in request. Ensure APIKeyMiddleware is configured and a valid API key is provided."
         )
 
     return api_key
@@ -127,7 +126,7 @@ def require_scope(scope: str) -> Guard:
 
         if not key_info.has_scope(scope):
             raise PermissionDeniedException(
-                detail=f"API key lacks required scope: {scope}. " f"Available scopes: {key_info.scopes}"
+                detail=f"API key lacks required scope: {scope}. Available scopes: {key_info.scopes}"
             )
 
     return guard
@@ -187,7 +186,7 @@ def require_scopes(*scopes: str, match: ScopeRequirement = "all") -> Guard:
 
         if not key_info.has_scopes(scopes_list, requirement=match):
             if match == "all":
-                detail = f"API key lacks required scopes. " f"Required: {scopes_list}, Available: {key_info.scopes}"
+                detail = f"API key lacks required scopes. Required: {scopes_list}, Available: {key_info.scopes}"
             else:
                 detail = (
                     f"API key lacks at least one required scope. "

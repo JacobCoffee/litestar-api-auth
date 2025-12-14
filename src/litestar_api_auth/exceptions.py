@@ -181,9 +181,7 @@ class InsufficientScopesError(APIAuthError):
         """
         message = "Insufficient scopes"
         if required_scopes or provided_scopes:
-            message = (
-                f"Insufficient scopes. " f"Required: {required_scopes or []}, " f"provided: {provided_scopes or []}"
-            )
+            message = f"Insufficient scopes. Required: {required_scopes or []}, provided: {provided_scopes or []}"
         super().__init__(message=message, detail=detail)
         self.required_scopes = required_scopes or []
         self.provided_scopes = provided_scopes or []
