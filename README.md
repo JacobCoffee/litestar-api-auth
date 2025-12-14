@@ -22,6 +22,10 @@
 ## Installation
 
 ```bash
+# Using uv (recommended)
+uv add litestar-api-auth
+
+# Using pip
 pip install litestar-api-auth
 ```
 
@@ -29,13 +33,13 @@ pip install litestar-api-auth
 
 ```bash
 # With SQLAlchemy support
-pip install litestar-api-auth[sqlalchemy]
+uv add litestar-api-auth[sqlalchemy]
 
 # With Redis support
-pip install litestar-api-auth[redis]
+uv add litestar-api-auth[redis]
 
 # All optional dependencies
-pip install litestar-api-auth[all]
+uv add litestar-api-auth[all]
 ```
 
 ## Quick Start
@@ -45,13 +49,13 @@ pip install litestar-api-auth[all]
 ```python
 from litestar import Litestar
 from litestar_api_auth import APIAuthPlugin, APIAuthConfig
-from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend
+from litestar_api_auth.backends.memory import MemoryBackend
 
 app = Litestar(
     plugins=[
         APIAuthPlugin(
             config=APIAuthConfig(
-                backend=SQLAlchemyBackend(engine),
+                backend=MemoryBackend(),  # Use SQLAlchemyBackend for production
                 key_prefix="myapp_",
                 header_name="X-API-Key",
                 auto_routes=True,
@@ -82,7 +86,7 @@ async def admin_route() -> dict:
 ### Working with API Keys
 
 ```python
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from litestar_api_auth.types import APIKeyInfo
 
 # API key information is available after authentication
@@ -91,8 +95,8 @@ key_info = APIKeyInfo(
     prefix="myapp_",
     name="Production API Key",
     scopes=["read:users", "write:posts"],
-    created_at=datetime.utcnow(),
-    expires_at=datetime.utcnow() + timedelta(days=365),
+    created_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc) + timedelta(days=365),
     last_used_at=None,
     is_active=True,
     metadata={"owner": "admin@example.com"},
@@ -126,10 +130,10 @@ API keys can be in one of three states:
 ### SQLAlchemy Backend
 
 ```python
-from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend
 
-engine = create_engine("postgresql://user:pass@localhost/db")
+engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
 backend = SQLAlchemyBackend(engine)
 ```
 
@@ -193,11 +197,13 @@ async def get_resource() -> dict:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `Backend` | Required | Storage backend instance |
-| `key_prefix` | `str` | `"api_"` | Prefix for generated keys |
+| `backend` | `APIKeyBackend` | Required | Storage backend instance |
+| `key_prefix` | `str` | `"pyorg_"` | Prefix for generated keys |
 | `header_name` | `str` | `"X-API-Key"` | HTTP header name for API key |
 | `auto_routes` | `bool` | `True` | Auto-register management routes |
 | `route_prefix` | `str` | `"/api-keys"` | Prefix for management routes |
+| `enable_openapi` | `bool` | `True` | Include auth in OpenAPI schema |
+| `track_usage` | `bool` | `True` | Update last_used_at on requests |
 
 ## Documentation
 

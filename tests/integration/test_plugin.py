@@ -14,7 +14,7 @@ from litestar_api_auth import APIAuthConfig, APIAuthPlugin, require_api_key
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend
 from litestar_api_auth.guards import require_scope, require_scopes
-from litestar_api_auth.service import generate_api_key, hash_api_key
+from litestar_api_auth.service import generate_api_key
 
 
 @pytest.fixture
@@ -141,7 +141,9 @@ class TestMiddlewareIntegration:
             assert response.status_code == 401
 
     @pytest.mark.integration
-    async def test_protected_route_with_valid_key(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_protected_route_with_valid_key(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test that protected routes work with a valid API key."""
         raw_key, _, _ = test_api_key
 
@@ -195,7 +197,9 @@ class TestScopeGuardsIntegration:
     """Test scope-based authorization guards."""
 
     @pytest.mark.integration
-    async def test_require_scope_grants_access(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_require_scope_grants_access(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test that require_scope grants access when scope is present."""
         raw_key, _, _ = test_api_key
 
@@ -220,7 +224,9 @@ class TestScopeGuardsIntegration:
             assert response.status_code == 200
 
     @pytest.mark.integration
-    async def test_require_scope_denies_access(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_require_scope_denies_access(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test that require_scope denies access when scope is missing."""
         raw_key, _, _ = test_api_key
 
@@ -245,7 +251,9 @@ class TestScopeGuardsIntegration:
             assert response.status_code == 403
 
     @pytest.mark.integration
-    async def test_require_scopes_all(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_require_scopes_all(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test require_scopes with 'all' requirement."""
         raw_key, _, _ = test_api_key
 
@@ -270,7 +278,9 @@ class TestScopeGuardsIntegration:
             assert response.status_code == 200
 
     @pytest.mark.integration
-    async def test_require_scopes_any(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_require_scopes_any(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test require_scopes with 'any' requirement."""
         raw_key, _, _ = test_api_key
 
@@ -299,7 +309,9 @@ class TestCustomHeaderName:
     """Test custom header name configuration."""
 
     @pytest.mark.integration
-    async def test_custom_header_name(self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]) -> None:
+    async def test_custom_header_name(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
         """Test that custom header names work correctly."""
         raw_key, _, _ = test_api_key
 
