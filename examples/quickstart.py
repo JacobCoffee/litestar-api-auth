@@ -6,7 +6,7 @@ core service and types.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from litestar_api_auth import (
     APIKeyInfo,
@@ -30,8 +30,8 @@ key_info = APIKeyInfo(
     prefix="demo_",
     name="Demo API Key",
     scopes=["read:users", "write:posts"],
-    created_at=datetime.utcnow(),
-    expires_at=datetime.utcnow() + timedelta(days=365),
+    created_at=datetime.now(timezone.utc),
+    expires_at=datetime.now(timezone.utc) + timedelta(days=365),
     is_active=True,
 )
 

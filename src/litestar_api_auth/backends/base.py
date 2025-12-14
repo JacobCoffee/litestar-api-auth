@@ -6,7 +6,7 @@ following the pattern from litestar-storages.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
@@ -41,6 +41,46 @@ class APIKeyInfo(msgspec.Struct):
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
     metadata: dict[str, Any] | None = None
+
+    @property
+    def is_expired(self) -> bool:
+        """Check if the API key has expired.
+
+        Returns:
+            True if the key has an expiration date that has passed, False otherwise.
+        """
+        if self.expires_at is None:
+            return False
+        now = datetime.now(timezone.utc)
+        expires = self.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        return now > expires
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if the API key has a specific scope.
+
+        Args:
+            scope: The scope to check for.
+
+        Returns:
+            True if the key has the scope, False otherwise.
+        """
+        return scope in self.scopes
+
+    def has_scopes(self, scopes: list[str], *, requirement: str = "all") -> bool:
+        """Check if the API key has the required scopes.
+
+        Args:
+            scopes: List of scopes to check for.
+            requirement: Either "all" (must have all scopes) or "any" (must have at least one).
+
+        Returns:
+            True if the scope requirement is satisfied, False otherwise.
+        """
+        if requirement == "all":
+            return all(s in self.scopes for s in scopes)
+        return any(s in self.scopes for s in scopes)
 
 
 @runtime_checkable

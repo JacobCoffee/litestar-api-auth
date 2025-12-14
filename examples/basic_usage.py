@@ -6,7 +6,7 @@ functionality without requiring a database or Litestar application.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from litestar_api_auth import (
     APIKeyInfo,
@@ -54,8 +54,8 @@ def main() -> None:
         prefix="demo_",
         name="Demo API Key",
         scopes=["read:users", "write:posts", "read:analytics"],
-        created_at=datetime.utcnow(),
-        expires_at=datetime.utcnow() + timedelta(days=365),
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=365),
         is_active=True,
         metadata={"owner": "demo@example.com", "environment": "development"},
     )
@@ -96,8 +96,8 @@ def main() -> None:
         prefix="demo_",
         name="Expired API Key",
         scopes=["read:users"],
-        created_at=datetime.utcnow() - timedelta(days=2),
-        expires_at=datetime.utcnow() - timedelta(days=1),
+        created_at=datetime.now(timezone.utc) - timedelta(days=2),
+        expires_at=datetime.now(timezone.utc) - timedelta(days=1),
         is_active=True,
     )
     print(f"   State: {expired_key_info.state.value}")
@@ -111,7 +111,7 @@ def main() -> None:
         prefix="demo_",
         name="Revoked API Key",
         scopes=["read:users"],
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         is_active=False,
     )
     print(f"   State: {revoked_key_info.state.value}")

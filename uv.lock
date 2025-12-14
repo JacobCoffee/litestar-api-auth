@@ -520,6 +520,7 @@ sqlalchemy = [
 dev = [
     { name = "advanced-alchemy" },
     { name = "aiosqlite" },
+    { name = "anyio" },
     { name = "codespell" },
     { name = "fakeredis" },
     { name = "linkify-it-py" },
@@ -534,6 +535,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "shibuya" },
+    { name = "sniffio" },
     { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sphinx", version = "8.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "sphinx-autobuild", version = "2024.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -569,6 +571,7 @@ lint = [
 test = [
     { name = "advanced-alchemy" },
     { name = "aiosqlite" },
+    { name = "anyio" },
     { name = "fakeredis" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -576,6 +579,7 @@ test = [
     { name = "pytest-sugar" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "sniffio" },
 ]
 
 [package.metadata]
@@ -592,6 +596,7 @@ provides-extras = ["all", "redis", "sqlalchemy"]
 dev = [
     { name = "advanced-alchemy", specifier = ">=0.20.0" },
     { name = "aiosqlite", specifier = ">=0.19.0" },
+    { name = "anyio", specifier = ">=4.0.0" },
     { name = "codespell", specifier = ">=2.2.6" },
     { name = "fakeredis", specifier = ">=2.20.0" },
     { name = "linkify-it-py", specifier = ">=2.0.0" },
@@ -606,6 +611,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.5.0" },
     { name = "ruff", specifier = ">=0.9.0" },
     { name = "shibuya", specifier = ">=2024.0.0" },
+    { name = "sniffio", specifier = ">=1.3.0" },
     { name = "sphinx", specifier = ">=7.0.0" },
     { name = "sphinx-autobuild", specifier = ">=2024.0.0" },
     { name = "sphinx-autodoc-typehints", specifier = ">=2.0.0" },
@@ -635,6 +641,7 @@ lint = [
 test = [
     { name = "advanced-alchemy", specifier = ">=0.20.0" },
     { name = "aiosqlite", specifier = ">=0.19.0" },
+    { name = "anyio", specifier = ">=4.0.0" },
     { name = "fakeredis", specifier = ">=2.20.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.23.0" },
@@ -642,6 +649,7 @@ test = [
     { name = "pytest-sugar", specifier = ">=1.1.1" },
     { name = "pytest-timeout", specifier = ">=2.2.0" },
     { name = "pytest-xdist", specifier = ">=3.5.0" },
+    { name = "sniffio", specifier = ">=1.3.0" },
 ]
 
 [[package]]
@@ -1240,6 +1248,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8e/55/8519b9f2594187a9340c2d42ee7b2ed494cae59ba82203333123a2ebc6fa/shibuya-2025.12.14.tar.gz", hash = "sha256:af365b0276f2f785126a097596ddf466aadb006c4c5e1bb52c13a8d88c106c61", size = 85766, upload-time = "2025-12-14T05:13:04.727Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/59/af/291723811d95766d1c31b0717187f56900dda483c31734af50b5132d96e8/shibuya-2025.12.14-py3-none-any.whl", hash = "sha256:8f4dce01a32ef978e301f1f5509693ec0a007edaa60f7a471fe66633ed22cbf6", size = 102913, upload-time = "2025-12-14T05:13:03.444Z" },
+]
+
+[[package]]
+name = "sniffio"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
 ]
 
 [[package]]

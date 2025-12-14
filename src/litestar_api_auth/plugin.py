@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 from litestar.plugins import InitPluginProtocol
 
+from litestar_api_auth.backends.base import APIKeyBackend
+
 if TYPE_CHECKING:
     from litestar.config.app import AppConfig
     from litestar.types import ControllerRouterHandler
-
-    from litestar_api_auth.backends.base import APIKeyBackend
 
 __all__ = [
     "APIAuthConfig",
@@ -204,17 +204,28 @@ class APIAuthPlugin(InitPluginProtocol):
         """
         from litestar_api_auth.controllers import APIKeyController
 
-        # Create controller with configuration
-        controller = APIKeyController(
-            backend=self.config.backend,
-            route_prefix=self.config.route_prefix,
-        )
+        # Create a dynamic controller class with the correct path
+        class ConfiguredAPIKeyController(APIKeyController):
+            path = self.config.route_prefix
+
+        # Store backend reference for dependency injection
+        from litestar.di import Provide
+
+        backend = self.config.backend
+
+        def provide_controller_backend() -> APIKeyBackend:
+            return backend
+
+        # Register backend dependency for controller
+        if app_config.dependencies is None:
+            app_config.dependencies = {}
+        app_config.dependencies["backend"] = Provide(provide_controller_backend, sync_to_thread=False)
 
         # Add to route handlers
         if app_config.route_handlers is None:
             app_config.route_handlers = []
 
-        app_config.route_handlers.append(controller)
+        app_config.route_handlers.append(ConfiguredAPIKeyController)
 
     def _register_lifespan_handlers(self, app_config: AppConfig) -> None:
         """Register lifespan handlers for backend startup and shutdown.
@@ -276,7 +287,7 @@ class APIAuthPlugin(InitPluginProtocol):
             app_config: The application configuration to modify.
         """
         from litestar.openapi.config import OpenAPIConfig
-        from litestar.openapi.spec import Components, SecurityRequirement, SecurityScheme
+        from litestar.openapi.spec import Components, SecurityScheme
 
         # Create or get OpenAPI config
         if app_config.openapi_config is None:
@@ -316,4 +327,4 @@ class APIAuthPlugin(InitPluginProtocol):
         if openapi_config.security is None:
             openapi_config.security = []
 
-        openapi_config.security.append(SecurityRequirement({"APIKeyAuth": []}))
+        openapi_config.security.append({"APIKeyAuth": []})

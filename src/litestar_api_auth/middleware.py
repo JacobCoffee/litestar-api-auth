@@ -7,18 +7,17 @@ request state for use by guards.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from litestar.middleware import AbstractMiddleware
 
+from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.exceptions import (
     APIKeyExpiredError,
     APIKeyNotFoundError,
     APIKeyRevokedError,
     InvalidAPIKeyError,
 )
-from litestar_api_auth.types import APIKeyInfo
 
 if TYPE_CHECKING:
     from litestar.types import ASGIApp, Receive, Scope, Send
@@ -36,7 +35,7 @@ class APIKeyBackend(Protocol):
     with the middleware.
     """
 
-    async def get_key_info(self, key_hash: str) -> APIKeyInfo | None:
+    async def get(self, key_hash: str) -> APIKeyInfo | None:
         """Retrieve API key information by its hash.
 
         Args:
@@ -47,12 +46,11 @@ class APIKeyBackend(Protocol):
         """
         ...
 
-    async def update_last_used(self, key_id: str, timestamp: datetime) -> None:
+    async def update_last_used(self, key_hash: str) -> None:
         """Update the last used timestamp for an API key.
 
         Args:
-            key_id: The unique identifier of the API key.
-            timestamp: The timestamp to set as last_used_at.
+            key_hash: The hashed API key value.
         """
         ...
 
@@ -137,10 +135,8 @@ class APIKeyMiddleware(AbstractMiddleware):
 
                 # Update last used timestamp if enabled
                 if self.update_last_used:
-                    await self.backend.update_last_used(
-                        key_id=key_info.key_id,
-                        timestamp=datetime.utcnow(),
-                    )
+                    key_hash = self._hash_api_key(api_key)
+                    await self.backend.update_last_used(key_hash)
             except (
                 APIKeyNotFoundError,
                 APIKeyExpiredError,
@@ -190,7 +186,7 @@ class APIKeyMiddleware(AbstractMiddleware):
         key_hash = self._hash_api_key(api_key)
 
         # Look up the key in the backend
-        key_info = await self.backend.get_key_info(key_hash)
+        key_info = await self.backend.get(key_hash)
 
         if key_info is None:
             raise APIKeyNotFoundError()

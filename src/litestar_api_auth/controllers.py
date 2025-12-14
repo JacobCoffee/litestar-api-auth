@@ -7,15 +7,14 @@ revoking, and deleting API keys.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import msgspec
 from litestar import Controller, delete, get, post
 from litestar.params import Parameter
 from litestar.status_codes import HTTP_201_CREATED, HTTP_204_NO_CONTENT
 
-if TYPE_CHECKING:
-    from litestar_api_auth.backends.base import APIKeyBackend
+from litestar_api_auth.backends.base import APIKeyBackend
 
 __all__ = ["APIKeyController"]
 
@@ -37,27 +36,17 @@ class APIKeyController(Controller):
         >>> from litestar_api_auth.controllers import APIKeyController
         >>> from litestar_api_auth.backends.memory import MemoryBackend
         >>>
-        >>> backend = MemoryBackend()
-        >>> controller = APIKeyController(backend=backend)
-        >>> app = Litestar(route_handlers=[controller])
+        >>> class MyController(APIKeyController):
+        ...     path = "/api-keys"
+        >>>
+        >>> app = Litestar(
+        ...     route_handlers=[MyController],
+        ...     dependencies={"backend": lambda: MemoryBackend()},
+        ... )
     """
 
-    path: ClassVar[str] = ""  # Will be set by route_prefix in config
+    path: ClassVar[str] = "/api-keys"
     tags: ClassVar[list[str]] = ["API Keys"]
-
-    def __init__(
-        self,
-        backend: APIKeyBackend,
-        route_prefix: str = "/api-keys",
-    ) -> None:
-        """Initialize the controller.
-
-        Args:
-            backend: The API key storage backend.
-            route_prefix: URL prefix for all routes.
-        """
-        self.backend = backend
-        self.path = route_prefix
 
     @post(
         "/",
@@ -68,6 +57,7 @@ class APIKeyController(Controller):
     async def create_api_key(
         self,
         data: CreateAPIKeyRequest,
+        backend: APIKeyBackend,
     ) -> CreateAPIKeyResponse:
         """Create a new API key.
 
@@ -105,7 +95,7 @@ class APIKeyController(Controller):
             metadata=data.metadata or {},
         )
 
-        created_key = await self.backend.create(key_hash, key_info)
+        created_key = await backend.create(key_hash, key_info)
 
         return CreateAPIKeyResponse(
             key_id=created_key.key_id,
@@ -123,19 +113,21 @@ class APIKeyController(Controller):
     )
     async def list_api_keys(
         self,
+        backend: APIKeyBackend,
         limit: Annotated[int, Parameter(ge=1, le=100, default=50)] = 50,
         offset: Annotated[int, Parameter(ge=0, default=0)] = 0,
     ) -> ListAPIKeysResponse:
         """List all API keys.
 
         Args:
+            backend: The API key storage backend.
             limit: Maximum number of keys to return (1-100, default 50).
             offset: Number of keys to skip for pagination.
 
         Returns:
             List of API key information (without plaintext keys).
         """
-        keys = await self.backend.list(limit=limit, offset=offset)
+        keys = await backend.list(limit=limit, offset=offset)
 
         return ListAPIKeysResponse(
             items=[
@@ -164,11 +156,13 @@ class APIKeyController(Controller):
     async def get_api_key(
         self,
         key_id: str,
+        backend: APIKeyBackend,
     ) -> APIKeyInfoResponse:
         """Get information about a specific API key.
 
         Args:
             key_id: The unique identifier of the API key.
+            backend: The API key storage backend.
 
         Returns:
             API key information (without plaintext key).
@@ -178,7 +172,7 @@ class APIKeyController(Controller):
         """
         from litestar.exceptions import NotFoundException
 
-        key_info = await self.backend.get_by_id(key_id)
+        key_info = await backend.get_by_id(key_id)
 
         if key_info is None:
             raise NotFoundException(detail=f"API key not found: {key_id}")
@@ -203,6 +197,7 @@ class APIKeyController(Controller):
     async def revoke_api_key(
         self,
         key_id: str,
+        backend: APIKeyBackend,
     ) -> None:
         """Revoke an API key.
 
@@ -211,6 +206,7 @@ class APIKeyController(Controller):
 
         Args:
             key_id: The unique identifier of the API key.
+            backend: The API key storage backend.
 
         Raises:
             NotFoundException: If the key is not found.
@@ -218,13 +214,13 @@ class APIKeyController(Controller):
         from litestar.exceptions import NotFoundException
 
         # Get the key to find its hash
-        key_info = await self.backend.get_by_id(key_id)
+        key_info = await backend.get_by_id(key_id)
 
         if key_info is None:
             raise NotFoundException(detail=f"API key not found: {key_id}")
 
         # Revoke the key
-        await self.backend.revoke(key_info.key_hash)
+        await backend.revoke(key_info.key_hash)
 
     @delete(
         "/{key_id:str}",
@@ -235,11 +231,13 @@ class APIKeyController(Controller):
     async def delete_api_key(
         self,
         key_id: str,
+        backend: APIKeyBackend,
     ) -> None:
         """Permanently delete an API key.
 
         Args:
             key_id: The unique identifier of the API key.
+            backend: The API key storage backend.
 
         Raises:
             NotFoundException: If the key is not found.
@@ -247,13 +245,13 @@ class APIKeyController(Controller):
         from litestar.exceptions import NotFoundException
 
         # Get the key to find its hash
-        key_info = await self.backend.get_by_id(key_id)
+        key_info = await backend.get_by_id(key_id)
 
         if key_info is None:
             raise NotFoundException(detail=f"API key not found: {key_id}")
 
         # Delete the key
-        success = await self.backend.delete(key_info.key_hash)
+        success = await backend.delete(key_info.key_hash)
 
         if not success:
             raise NotFoundException(detail=f"API key not found: {key_id}")
