@@ -1,0 +1,37 @@
+/* Custom CSS for litestar-api-auth documentation */
+
+/* Code block styling enhancements */
+.highlight pre {
+    padding: 1rem;
+    border-radius: 0.5rem;
+}
+
+/* Table improvements */
+table.docutils {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+table.docutils td,
+table.docutils th {
+    padding: 0.75rem;
+    border: 1px solid var(--color-border);
+}
+
+/* Admonition styling */
+.admonition {
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin: 1rem 0;
+}
+
+/* API reference improvements */
+.sig-param {
+    font-style: italic;
+}
+
+/* Better inline code visibility */
+code.literal {
+    padding: 0.125rem 0.25rem;
+    border-radius: 0.25rem;
+}

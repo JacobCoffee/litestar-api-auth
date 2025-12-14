@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="teal" data-content_root="../">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Storage Backends - litestar-api-auth</title><link rel="index" title="Index" href="../genindex.html" /><link rel="search" title="Search" href="../search.html" /><link rel="next" title="Scopes and Permissions" href="scopes.html" /><link rel="prev" title="Guards and Authentication" href="guards.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="../_static/shibuya.css?v=83cb36c2" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/sphinx-design.min.css?v=95c83b7e" />
+    <link media="print" rel="stylesheet" type="text/css" href="../_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=da7df7ad" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    <meta property="og:type" content="website"/><meta property="og:title" content="Storage Backends"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="../index.html">
+      
+      
+      <strong>litestar-api-auth</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"><ul><li class="link">
+          <a href="https://litestar.dev/">
+            <span>Litestar</span></a>
+        </li><li class="link">
+          <a href="https://pypi.org/project/litestar-api-auth/">
+            <span>PyPI</span></a>
+        </li></ul></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="../search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/JacobCoffee/litestar-api-auth" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting-started.html">Getting Started</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Usage</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="guards.html">Guards and Authentication</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Storage Backends</a></li>
+<li class="toctree-l1"><a class="reference internal" href="scopes.html">Scopes and Permissions</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/index.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#memory-backend">Memory Backend</a></li>
+<li><a class="reference internal" href="#sqlalchemy-backend">SQLAlchemy Backend</a><ul>
+<li><a class="reference internal" href="#database-migrations">Database Migrations</a></li>
+<li><a class="reference internal" href="#advanced-alchemy-integration">Advanced Alchemy Integration</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#redis-backend">Redis Backend</a><ul>
+<li><a class="reference internal" href="#caching-layer">Caching Layer</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#custom-backends">Custom Backends</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="../index.html"><span itemprop="name">litestar-api-auth</span></a>
+        <span>/</span>
+        <meta itemprop="position" content="1" />
+      </li><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <strong itemprop="name">Storage Backends</strong>
+        <meta itemprop="position" content="2" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  
+
+
+<div class="copy-page-wrapper relative pb-4 lg:absolute lg:top-8 lg:right-6 xl:right-12">
+  <div id="copy-page-trigger">
+    <button
+      type="button"
+      class="js-copy px-3 py-1 inline-flex items-center gap-1"
+      data-url="../_sources/usage/backends.md.txt"
+    >
+      <i class="i-lucide" data-icon="copy"></i>
+      <span>Copy page</span>
+    </button>
+    <button class="js-menu px-2 py-1" type="button" aria-label="More actions"
+      aria-haspopup="menu" aria-expanded="false" aria-controls="copy-page-content">
+      <i class="i-lucide chevron-down"></i>
+    </button>
+  </div>
+  <div id="copy-page-content" role="menu" aria-orientation="vertical" aria-hidden="true">
+    <div role="presentation">
+      <div class="flex flex-col" role="group">
+        <button class="js-copy" type="button" role="menuitem"
+          data-url="../_sources/usage/backends.md.txt">
+          <span class="iconify-icon">
+            <i class="i-lucide" data-icon="copy"></i>
+          </span>
+          <span>Copy page</span>
+        </button>
+        <a role="menuitem" href="../_sources/usage/backends.md.txt" target="_blank" rel="nofollow">
+          
+            <iconify-icon icon="bi:markdown"></iconify-icon>
+            <span>View as Markdown</span>
+          
+        </a>
+        
+        <a role="menuitem" href="https://chatgpt.com/?hints=search&q=Read%20../_sources/usage/backends.md.txt%20so%20I%20can%20ask%20questions%20about%20it." target="_blank" rel="nofollow">
+          <iconify-icon icon="bi:openai"></iconify-icon>
+          <span>Open in ChatGPT</span>
+        </a>
+        
+        
+        <a role="menuitem" href="https://claude.ai/new?q=Read%20../_sources/usage/backends.md.txt%20so%20I%20can%20ask%20questions%20about%20it." target="_blank" rel="nofollow">
+          <iconify-icon icon="bi:claude"></iconify-icon>
+          <span>Open in Claude</span>
+        </a>
+        
+        
+      </div>
+    </div>
+  </div>
+</div>
+<article class="yue" role="main">
+          <section id="storage-backends">
+<h1>Storage Backends<a class="headerlink" href="#storage-backends" title="Link to this heading">¶</a></h1>
+<p>litestar-api-auth supports multiple storage backends for API key persistence.</p>
+<section id="memory-backend">
+<h2>Memory Backend<a class="headerlink" href="#memory-backend" title="Link to this heading">¶</a></h2>
+<p>The memory backend stores keys in memory. Perfect for development and testing:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIAuthConfig</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.backends.memory</span><span class="w"> </span><span class="kn">import</span> <span class="n">MemoryBackend</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="5">    <span class="n">backend</span><span class="o">=</span><span class="n">MemoryBackend</span><span class="p">(),</span>
+</span><span data-line="6">    <span class="n">key_prefix</span><span class="o">=</span><span class="s2">&quot;dev_&quot;</span><span class="p">,</span>
+</span><span data-line="7"><span class="p">)</span>
+</span></pre></div>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Keys are lost when the application restarts. Do not use in production.</p>
+</div>
+</section>
+<section id="sqlalchemy-backend">
+<h2>SQLAlchemy Backend<a class="headerlink" href="#sqlalchemy-backend" title="Link to this heading">¶</a></h2>
+<p>The SQLAlchemy backend persists keys to your database. Recommended for production:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">sqlalchemy.ext.asyncio</span><span class="w"> </span><span class="kn">import</span> <span class="n">create_async_engine</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIAuthConfig</span>
+</span><span data-line="3"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.backends.sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLAlchemyBackend</span>
+</span><span data-line="4">
+</span><span data-line="5"><span class="n">engine</span> <span class="o">=</span> <span class="n">create_async_engine</span><span class="p">(</span><span class="s2">&quot;postgresql+asyncpg://user:pass@localhost/myapp&quot;</span><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="8">    <span class="n">backend</span><span class="o">=</span><span class="n">SQLAlchemyBackend</span><span class="p">(</span><span class="n">engine</span><span class="p">),</span>
+</span><span data-line="9">    <span class="n">key_prefix</span><span class="o">=</span><span class="s2">&quot;prod_&quot;</span><span class="p">,</span>
+</span><span data-line="10"><span class="p">)</span>
+</span></pre></div>
+</div>
+<section id="database-migrations">
+<h3>Database Migrations<a class="headerlink" href="#database-migrations" title="Link to this heading">¶</a></h3>
+<p>The backend will create the necessary tables automatically, or you can use Alembic:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="c1"># In your Alembic env.py</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIKeyModel</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="n">target_metadata</span> <span class="o">=</span> <span class="n">APIKeyModel</span><span class="o">.</span><span class="n">metadata</span>
+</span></pre></div>
+</div>
+</section>
+<section id="advanced-alchemy-integration">
+<h3>Advanced Alchemy Integration<a class="headerlink" href="#advanced-alchemy-integration" title="Link to this heading">¶</a></h3>
+<p>For applications using Advanced Alchemy:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.contrib.sqlalchemy</span><span class="w"> </span><span class="kn">import</span> <span class="n">SQLAlchemyRepository</span><span class="p">,</span> <span class="n">SQLAlchemyService</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="c1"># Use the repository directly</span>
+</span><span data-line="4"><span class="n">repo</span> <span class="o">=</span> <span class="n">SQLAlchemyRepository</span><span class="p">(</span><span class="n">session</span><span class="o">=</span><span class="n">session</span><span class="p">)</span>
+</span><span data-line="5"><span class="n">keys</span> <span class="o">=</span> <span class="k">await</span> <span class="n">repo</span><span class="o">.</span><span class="n">list_by_owner</span><span class="p">(</span><span class="n">owner_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="redis-backend">
+<h2>Redis Backend<a class="headerlink" href="#redis-backend" title="Link to this heading">¶</a></h2>
+<p>The Redis backend provides high-performance key validation with optional caching:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">import</span><span class="w"> </span><span class="nn">redis.asyncio</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">redis</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIAuthConfig</span>
+</span><span data-line="3"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.backends.redis</span><span class="w"> </span><span class="kn">import</span> <span class="n">RedisBackend</span>
+</span><span data-line="4">
+</span><span data-line="5"><span class="n">redis_client</span> <span class="o">=</span> <span class="n">redis</span><span class="o">.</span><span class="n">from_url</span><span class="p">(</span><span class="s2">&quot;redis://localhost:6379/0&quot;</span><span class="p">)</span>
+</span><span data-line="6">
+</span><span data-line="7"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="8">    <span class="n">backend</span><span class="o">=</span><span class="n">RedisBackend</span><span class="p">(</span><span class="n">redis_client</span><span class="p">),</span>
+</span><span data-line="9">    <span class="n">key_prefix</span><span class="o">=</span><span class="s2">&quot;api_&quot;</span><span class="p">,</span>
+</span><span data-line="10"><span class="p">)</span>
+</span></pre></div>
+</div>
+<section id="caching-layer">
+<h3>Caching Layer<a class="headerlink" href="#caching-layer" title="Link to this heading">¶</a></h3>
+<p>Use Redis as a cache in front of SQLAlchemy for high-traffic applications:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.backends.redis</span><span class="w"> </span><span class="kn">import</span> <span class="n">RedisCacheBackend</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="4">    <span class="n">backend</span><span class="o">=</span><span class="n">RedisCacheBackend</span><span class="p">(</span>
+</span><span data-line="5">        <span class="n">redis</span><span class="o">=</span><span class="n">redis_client</span><span class="p">,</span>
+</span><span data-line="6">        <span class="n">primary</span><span class="o">=</span><span class="n">SQLAlchemyBackend</span><span class="p">(</span><span class="n">engine</span><span class="p">),</span>
+</span><span data-line="7">        <span class="n">ttl</span><span class="o">=</span><span class="mi">300</span><span class="p">,</span>  <span class="c1"># Cache keys for 5 minutes</span>
+</span><span data-line="8">    <span class="p">),</span>
+</span><span data-line="9"><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="custom-backends">
+<h2>Custom Backends<a class="headerlink" href="#custom-backends" title="Link to this heading">¶</a></h2>
+<p>Implement the <code class="docutils literal notranslate"><span class="pre">Backend</span></code> protocol for custom storage:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">AsyncIterator</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.backends.base</span><span class="w"> </span><span class="kn">import</span> <span class="n">Backend</span>
+</span><span data-line="3"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIKey</span>
+</span><span data-line="4">
+</span><span data-line="5"><span class="k">class</span><span class="w"> </span><span class="nc">MyCustomBackend</span><span class="p">(</span><span class="n">Backend</span><span class="p">):</span>
+</span><span data-line="6"><span class="w">    </span><span class="sd">&quot;&quot;&quot;Custom storage backend.&quot;&quot;&quot;</span>
+</span><span data-line="7">
+</span><span data-line="8">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_by_hash</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key_hash</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">APIKey</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="9"><span class="w">        </span><span class="sd">&quot;&quot;&quot;Retrieve a key by its hash.&quot;&quot;&quot;</span>
+</span><span data-line="10">        <span class="o">...</span>
+</span><span data-line="11">
+</span><span data-line="12">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">create</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">api_key</span><span class="p">:</span> <span class="n">APIKey</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">APIKey</span><span class="p">:</span>
+</span><span data-line="13"><span class="w">        </span><span class="sd">&quot;&quot;&quot;Store a new API key.&quot;&quot;&quot;</span>
+</span><span data-line="14">        <span class="o">...</span>
+</span><span data-line="15">
+</span><span data-line="16">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">update</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">api_key</span><span class="p">:</span> <span class="n">APIKey</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">APIKey</span><span class="p">:</span>
+</span><span data-line="17"><span class="w">        </span><span class="sd">&quot;&quot;&quot;Update an existing API key.&quot;&quot;&quot;</span>
+</span><span data-line="18">        <span class="o">...</span>
+</span><span data-line="19">
+</span><span data-line="20">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">delete</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">key_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="21"><span class="w">        </span><span class="sd">&quot;&quot;&quot;Delete an API key.&quot;&quot;&quot;</span>
+</span><span data-line="22">        <span class="o">...</span>
+</span><span data-line="23">
+</span><span data-line="24">    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">list_by_owner</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">owner_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AsyncIterator</span><span class="p">[</span><span class="n">APIKey</span><span class="p">]:</span>
+</span><span data-line="25"><span class="w">        </span><span class="sd">&quot;&quot;&quot;List all keys for an owner.&quot;&quot;&quot;</span>
+</span><span data-line="26">        <span class="o">...</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-prev">
+    <a href="guards.html">
+      <i class="i-lucide chevron-left"></i>
+      <div class="page-info">
+        <span>Previous</span><div class="title">Guards and Authentication</div></div>
+    </a>
+  </div><div class="navigation-next">
+    <a href="scopes.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Scopes and Permissions</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2025, Jacob Coffee</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/JacobCoffee/litestar-api-auth" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=30646c52"></script>
+      <script src="../_static/design-tabs.js?v=f930bc37"></script>
+      <script src="../_static/shibuya.js?v=cac61aee"></script></body>
+</html>

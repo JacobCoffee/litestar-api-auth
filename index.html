@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en" data-accent-color="teal" data-content_root="./">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>litestar-api-auth</title><link rel="index" title="Index" href="genindex.html" /><link rel="search" title="Search" href="search.html" /><link rel="next" title="Getting Started" href="getting-started.html" /><script>
+    function setColorMode(t){let e=document.documentElement;e.setAttribute("data-color-mode",t);let a=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches,s=t;"auto"===t&&(s=a?"dark":"light"),"light"===s?(e.classList.remove("dark"),e.classList.add("light")):(e.classList.remove("light"),e.classList.add("dark"))}
+    setColorMode(localStorage._theme||"auto");
+  </script><link rel="stylesheet" type="text/css" href="_static/pygments.css?v=e1a1ceaf" />
+    <link rel="stylesheet" type="text/css" href="_static/shibuya.css?v=83cb36c2" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/sphinx-design.min.css?v=95c83b7e" />
+    <link media="print" rel="stylesheet" type="text/css" href="_static/print.css?v=20ff2c19" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=da7df7ad" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --sy-f-text: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+  --sy-f-heading: "Inter", var(--sy-f-sys), var(--sy-f-cjk), sans-serif;
+}
+</style>
+    <meta property="og:type" content="website"/><meta property="og:title" content="litestar-api-auth"/>
+    <meta name="twitter:card" content="summary"/>
+  </head>
+<body><div class="sy-head">
+  <div class="sy-head-blur"></div>
+  <div class="sy-head-inner sy-container mx-auto">
+    <a class="sy-head-brand" href="#">
+      
+      
+      <strong>litestar-api-auth</strong>
+    </a>
+    <div class="sy-head-nav" id="head-nav">
+      <nav class="sy-head-links"><ul><li class="link">
+          <a href="https://litestar.dev/">
+            <span>Litestar</span></a>
+        </li><li class="link">
+          <a href="https://pypi.org/project/litestar-api-auth/">
+            <span>PyPI</span></a>
+        </li></ul></nav>
+      <div class="sy-head-extra flex items-center print:hidden"><form class="searchbox flex items-center" action="search.html" method="get">
+  <input type="text" name="q" placeholder="Search" />
+  <kbd>/</kbd>
+</form><div class="sy-head-socials">
+  <a href="https://github.com/JacobCoffee/litestar-api-auth" aria-label="GitHub">
+    <iconify-icon icon="simple-icons:github"></iconify-icon>
+  </a></div></div>
+    </div>
+    <div class="sy-head-actions flex items-center shrink-0 print:hidden"><button class="js-theme theme-switch flex items-center"
+data-aria-auto="Switch to light color mode"
+data-aria-light="Switch to dark color mode"
+data-aria-dark="Switch to auto color mode">
+<i class="i-lucide theme-icon"></i>
+</button><button class="md:hidden flex items-center js-menu" aria-label="Menu" type="button" aria-controls="head-nav" aria-expanded="false">
+        <div class="hamburger">
+          <span class="hamburger_1"></span>
+          <span class="hamburger_2"></span>
+          <span class="hamburger_3"></span>
+        </div>
+      </button>
+    </div>
+  </div>
+</div>
+<div class="sy-page sy-container flex mx-auto">
+  <aside id="lside" class="sy-lside md:w-72 md:shrink-0 print:hidden">
+    <div class="sy-lside-inner md:sticky">
+      <div class="sy-scrollbar p-6">
+        <div class="globaltoc" data-expand-depth="0"><p class="caption" role="heading" aria-level="3"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="getting-started.html">Getting Started</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Usage</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="usage/guards.html">Guards and Authentication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage/backends.html">Storage Backends</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage/scopes.html">Scopes and Permissions</a></li>
+</ul>
+<p class="caption" role="heading" aria-level="3"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="api/index.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+  <div class="lside-overlay js-menu" role="button" aria-label="Close left sidebar" aria-controls="lside" aria-expanded="false"></div>
+  <aside id="rside" class="sy-rside pb-3 w-64 shrink-0 order-last">
+    <button class="rside-close js-menu xl:hidden" aria-label="Close Table of Contents" type="button" aria-controls="rside" aria-expanded="false">
+      <i class="i-lucide close"></i>
+    </button>
+    <div class="sy-scrollbar sy-rside-inner px-6 xl:top-16 xl:sticky xl:pl-0 pt-6 pb-4"><div class="localtoc"><h3>On this page</h3><ul>
+<li><a class="reference internal" href="#what-is-litestar-api-auth">What is litestar-api-auth?</a></li>
+<li><a class="reference internal" href="#key-features">Key Features</a><ul>
+<li><a class="reference internal" href="#secure-key-generation">Secure Key Generation</a></li>
+<li><a class="reference internal" href="#configurable-key-prefixes">Configurable Key Prefixes</a></li>
+<li><a class="reference internal" href="#multiple-storage-backends">Multiple Storage Backends</a></li>
+<li><a class="reference internal" href="#flexible-guards">Flexible Guards</a></li>
+<li><a class="reference internal" href="#auto-registered-routes">Auto-Registered Routes</a></li>
+<li><a class="reference internal" href="#expiration-and-revocation">Expiration and Revocation</a></li>
+<li><a class="reference internal" href="#last-used-tracking">Last-Used Tracking</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#documentation-contents">Documentation Contents</a><ul>
+</ul>
+</li>
+<li><a class="reference internal" href="#quick-links">Quick Links</a></li>
+</ul>
+</div><div id="ethical-ad-placement" data-ea-publisher="readthedocs"></div></div>
+  </aside>
+  <div class="rside-overlay js-menu" role="button" aria-label="Close Table of Contents" aria-controls="rside" aria-expanded="false"></div>
+  <main class="sy-main w-full max-sm:max-w-full print:pt-6">
+<div class="sy-breadcrumbs" role="navigation">
+  <div class="sy-breadcrumbs-inner flex items-center">
+    <div class="md:hidden mr-3">
+      <button class="js-menu" aria-label="Menu" type="button" aria-controls="lside" aria-expanded="false">
+        <i class="i-lucide menu"></i>
+      </button>
+    </div>
+    <ol class="flex-1" itemscope itemtype="https://schema.org/BreadcrumbList"><li itemprop="itemListElement" itemscope itemtype="https://schema.org/ListItem">
+        <a itemprop="item" href="#"><span itemprop="name">litestar-api-auth</span></a>
+        <meta itemprop="position" content="1" />
+      </li></ol>
+    <div class="xl:hidden ml-1">
+      <button class="js-menu" aria-label="Show table of contents" type="button" aria-controls="rside"
+        aria-expanded="false">
+        <i class="i-lucide outdent"></i>
+      </button>
+    </div>
+  </div>
+</div><div class="flex flex-col break-words justify-between">
+      <div class="relative min-w-0 max-w-6xl px-6 pb-6 pt-8 xl:px-12">
+  
+
+
+<div class="copy-page-wrapper relative pb-4 lg:absolute lg:top-8 lg:right-6 xl:right-12">
+  <div id="copy-page-trigger">
+    <button
+      type="button"
+      class="js-copy px-3 py-1 inline-flex items-center gap-1"
+      data-url="_sources/index.md.txt"
+    >
+      <i class="i-lucide" data-icon="copy"></i>
+      <span>Copy page</span>
+    </button>
+    <button class="js-menu px-2 py-1" type="button" aria-label="More actions"
+      aria-haspopup="menu" aria-expanded="false" aria-controls="copy-page-content">
+      <i class="i-lucide chevron-down"></i>
+    </button>
+  </div>
+  <div id="copy-page-content" role="menu" aria-orientation="vertical" aria-hidden="true">
+    <div role="presentation">
+      <div class="flex flex-col" role="group">
+        <button class="js-copy" type="button" role="menuitem"
+          data-url="_sources/index.md.txt">
+          <span class="iconify-icon">
+            <i class="i-lucide" data-icon="copy"></i>
+          </span>
+          <span>Copy page</span>
+        </button>
+        <a role="menuitem" href="_sources/index.md.txt" target="_blank" rel="nofollow">
+          
+            <iconify-icon icon="bi:markdown"></iconify-icon>
+            <span>View as Markdown</span>
+          
+        </a>
+        
+        <a role="menuitem" href="https://chatgpt.com/?hints=search&q=Read%20_sources/index.md.txt%20so%20I%20can%20ask%20questions%20about%20it." target="_blank" rel="nofollow">
+          <iconify-icon icon="bi:openai"></iconify-icon>
+          <span>Open in ChatGPT</span>
+        </a>
+        
+        
+        <a role="menuitem" href="https://claude.ai/new?q=Read%20_sources/index.md.txt%20so%20I%20can%20ask%20questions%20about%20it." target="_blank" rel="nofollow">
+          <iconify-icon icon="bi:claude"></iconify-icon>
+          <span>Open in Claude</span>
+        </a>
+        
+        
+      </div>
+    </div>
+  </div>
+</div>
+<article class="yue" role="main">
+          <section id="litestar-api-auth">
+<h1>litestar-api-auth<a class="headerlink" href="#litestar-api-auth" title="Link to this heading">¶</a></h1>
+<p>Pluggable API key authentication for <a class="reference external" href="https://litestar.dev/">Litestar</a> applications.</p>
+<section id="what-is-litestar-api-auth">
+<h2>What is litestar-api-auth?<a class="headerlink" href="#what-is-litestar-api-auth" title="Link to this heading">¶</a></h2>
+<p>litestar-api-auth provides a complete, production-ready API key authentication system for Litestar applications. It handles key generation, validation, storage, and access control so you can focus on building your API.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar</span><span class="w"> </span><span class="kn">import</span> <span class="n">Litestar</span><span class="p">,</span> <span class="n">get</span>
+</span><span data-line="2"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIAuthPlugin</span><span class="p">,</span> <span class="n">APIAuthConfig</span><span class="p">,</span> <span class="n">require_api_key</span>
+</span><span data-line="3">
+</span><span data-line="4"><span class="nd">@get</span><span class="p">(</span><span class="s2">&quot;/protected&quot;</span><span class="p">,</span> <span class="n">guards</span><span class="o">=</span><span class="p">[</span><span class="n">require_api_key</span><span class="p">])</span>
+</span><span data-line="5"><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">protected_route</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+</span><span data-line="6">    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;status&quot;</span><span class="p">:</span> <span class="s2">&quot;authenticated&quot;</span><span class="p">}</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="n">app</span> <span class="o">=</span> <span class="n">Litestar</span><span class="p">(</span>
+</span><span data-line="9">    <span class="n">route_handlers</span><span class="o">=</span><span class="p">[</span><span class="n">protected_route</span><span class="p">],</span>
+</span><span data-line="10">    <span class="n">plugins</span><span class="o">=</span><span class="p">[</span><span class="n">APIAuthPlugin</span><span class="p">(</span><span class="n">config</span><span class="o">=</span><span class="n">APIAuthConfig</span><span class="p">())],</span>
+</span><span data-line="11"><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="key-features">
+<h2>Key Features<a class="headerlink" href="#key-features" title="Link to this heading">¶</a></h2>
+<section id="secure-key-generation">
+<h3>Secure Key Generation<a class="headerlink" href="#secure-key-generation" title="Link to this heading">¶</a></h3>
+<p>API keys are generated with cryptographic security and stored using SHA-256 hashing. Keys are only shown once at creation time.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">APIKeyService</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="n">service</span> <span class="o">=</span> <span class="n">APIKeyService</span><span class="p">(</span><span class="n">backend</span><span class="o">=</span><span class="n">backend</span><span class="p">)</span>
+</span><span data-line="4"><span class="n">api_key</span> <span class="o">=</span> <span class="k">await</span> <span class="n">service</span><span class="o">.</span><span class="n">create_key</span><span class="p">(</span>
+</span><span data-line="5">    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Production API Key&quot;</span><span class="p">,</span>
+</span><span data-line="6">    <span class="n">owner_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span data-line="7">    <span class="n">scopes</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;read&quot;</span><span class="p">,</span> <span class="s2">&quot;write&quot;</span><span class="p">],</span>
+</span><span data-line="8"><span class="p">)</span>
+</span><span data-line="9"><span class="c1"># api_key.key is only available at creation time</span>
+</span><span data-line="10"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Your API key: </span><span class="si">{</span><span class="n">api_key</span><span class="o">.</span><span class="n">key</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="configurable-key-prefixes">
+<h3>Configurable Key Prefixes<a class="headerlink" href="#configurable-key-prefixes" title="Link to this heading">¶</a></h3>
+<p>Identify your API keys at a glance with customizable prefixes:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="2">    <span class="n">key_prefix</span><span class="o">=</span><span class="s2">&quot;myapp_&quot;</span><span class="p">,</span>  <span class="c1"># Keys look like: myapp_abc123...</span>
+</span><span data-line="3"><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="multiple-storage-backends">
+<h3>Multiple Storage Backends<a class="headerlink" href="#multiple-storage-backends" title="Link to this heading">¶</a></h3>
+<p>Choose the backend that fits your architecture:</p>
+<ul class="simple">
+<li><p><strong>SQLAlchemy</strong>: Production-ready with Advanced Alchemy integration</p></li>
+<li><p><strong>Redis</strong>: High-performance caching and validation</p></li>
+<li><p><strong>Memory</strong>: Perfect for testing and development</p></li>
+</ul>
+</section>
+<section id="flexible-guards">
+<h3>Flexible Guards<a class="headerlink" href="#flexible-guards" title="Link to this heading">¶</a></h3>
+<p>Protect routes with simple guards or fine-grained scope requirements:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">litestar_api_auth</span><span class="w"> </span><span class="kn">import</span> <span class="n">require_api_key</span><span class="p">,</span> <span class="n">require_scope</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="c1"># Basic authentication</span>
+</span><span data-line="4"><span class="nd">@get</span><span class="p">(</span><span class="s2">&quot;/api/data&quot;</span><span class="p">,</span> <span class="n">guards</span><span class="o">=</span><span class="p">[</span><span class="n">require_api_key</span><span class="p">])</span>
+</span><span data-line="5"><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">get_data</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+</span><span data-line="6">    <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="s2">&quot;sensitive&quot;</span><span class="p">}</span>
+</span><span data-line="7">
+</span><span data-line="8"><span class="c1"># Scope-based authorization</span>
+</span><span data-line="9"><span class="nd">@delete</span><span class="p">(</span><span class="s2">&quot;/api/admin/users/{user_id:str}&quot;</span><span class="p">,</span> <span class="n">guards</span><span class="o">=</span><span class="p">[</span><span class="n">require_scope</span><span class="p">(</span><span class="s2">&quot;admin:delete&quot;</span><span class="p">)])</span>
+</span><span data-line="10"><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">delete_user</span><span class="p">(</span><span class="n">user_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span data-line="11">    <span class="o">...</span>
+</span></pre></div>
+</div>
+</section>
+<section id="auto-registered-routes">
+<h3>Auto-Registered Routes<a class="headerlink" href="#auto-registered-routes" title="Link to this heading">¶</a></h3>
+<p>Get a complete API key management API out of the box:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">config</span> <span class="o">=</span> <span class="n">APIAuthConfig</span><span class="p">(</span>
+</span><span data-line="2">    <span class="n">auto_routes</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span data-line="3">    <span class="n">route_prefix</span><span class="o">=</span><span class="s2">&quot;/api/v1/api-keys&quot;</span><span class="p">,</span>
+</span><span data-line="4"><span class="p">)</span>
+</span><span data-line="5"><span class="c1"># Automatically registers:</span>
+</span><span data-line="6"><span class="c1"># POST   /api/v1/api-keys      - Create new key</span>
+</span><span data-line="7"><span class="c1"># GET    /api/v1/api-keys      - List keys</span>
+</span><span data-line="8"><span class="c1"># GET    /api/v1/api-keys/{id} - Get key details</span>
+</span><span data-line="9"><span class="c1"># DELETE /api/v1/api-keys/{id} - Revoke key</span>
+</span></pre></div>
+</div>
+</section>
+<section id="expiration-and-revocation">
+<h3>Expiration and Revocation<a class="headerlink" href="#expiration-and-revocation" title="Link to this heading">¶</a></h3>
+<p>Built-in support for key lifecycle management:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">timedelta</span>
+</span><span data-line="2">
+</span><span data-line="3"><span class="c1"># Create key that expires in 30 days</span>
+</span><span data-line="4"><span class="n">api_key</span> <span class="o">=</span> <span class="k">await</span> <span class="n">service</span><span class="o">.</span><span class="n">create_key</span><span class="p">(</span>
+</span><span data-line="5">    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Temporary Access&quot;</span><span class="p">,</span>
+</span><span data-line="6">    <span class="n">owner_id</span><span class="o">=</span><span class="s2">&quot;user-123&quot;</span><span class="p">,</span>
+</span><span data-line="7">    <span class="n">expires_in</span><span class="o">=</span><span class="n">timedelta</span><span class="p">(</span><span class="n">days</span><span class="o">=</span><span class="mi">30</span><span class="p">),</span>
+</span><span data-line="8"><span class="p">)</span>
+</span><span data-line="9">
+</span><span data-line="10"><span class="c1"># Revoke a key immediately</span>
+</span><span data-line="11"><span class="k">await</span> <span class="n">service</span><span class="o">.</span><span class="n">revoke_key</span><span class="p">(</span><span class="n">key_id</span><span class="o">=</span><span class="n">api_key</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+<section id="last-used-tracking">
+<h3>Last-Used Tracking<a class="headerlink" href="#last-used-tracking" title="Link to this heading">¶</a></h3>
+<p>Monitor API key usage for security auditing:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span data-line="1"><span class="n">key_info</span> <span class="o">=</span> <span class="k">await</span> <span class="n">service</span><span class="o">.</span><span class="n">get_key</span><span class="p">(</span><span class="n">key_id</span><span class="p">)</span>
+</span><span data-line="2"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Last used: </span><span class="si">{</span><span class="n">key_info</span><span class="o">.</span><span class="n">last_used_at</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span><span data-line="3"><span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Total requests: </span><span class="si">{</span><span class="n">key_info</span><span class="o">.</span><span class="n">request_count</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</span></pre></div>
+</div>
+</section>
+</section>
+<section id="documentation-contents">
+<h2>Documentation Contents<a class="headerlink" href="#documentation-contents" title="Link to this heading">¶</a></h2>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="getting-started.html">Getting Started</a></li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Usage</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="usage/guards.html">Guards and Authentication</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage/backends.html">Storage Backends</a></li>
+<li class="toctree-l1"><a class="reference internal" href="usage/scopes.html">Scopes and Permissions</a></li>
+</ul>
+</div>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="api/index.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="changelog.html">Changelog</a></li>
+</ul>
+</div>
+</section>
+<section id="quick-links">
+<h2>Quick Links<a class="headerlink" href="#quick-links" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="getting-started.html"><span class="std std-doc">Installation and Setup</span></a></p></li>
+<li><p><a class="reference internal" href="usage/guards.html"><span class="std std-doc">Guards and Authentication</span></a></p></li>
+<li><p><a class="reference internal" href="usage/backends.html"><span class="std std-doc">Storage Backends</span></a></p></li>
+<li><p><a class="reference internal" href="usage/scopes.html"><span class="std std-doc">Scopes and Permissions</span></a></p></li>
+<li><p><a class="reference internal" href="api/index.html"><span class="std std-doc">API Reference</span></a></p></li>
+<li><p><a class="reference external" href="https://github.com/JacobCoffee/litestar-api-auth">GitHub Repository</a></p></li>
+</ul>
+</section>
+</section>
+
+        </article><button class="back-to-top" type="button">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+    <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+  </svg>
+  <span>Back to top</span>
+</button><div class="navigation flex print:hidden"><div class="navigation-next">
+    <a href="getting-started.html">
+      <div class="page-info">
+        <span>Next</span>
+        <div class="title">Getting Started</div>
+      </div>
+      <i class="i-lucide chevron-right"></i>
+    </a>
+  </div></div></div>
+    </div>
+  </main>
+</div>
+<footer class="sy-foot">
+  <div class="sy-foot-inner sy-container mx-auto">
+    <div class="sy-foot-reserved md:flex justify-between items-center">
+      <div class="sy-foot-copyright"><p>2025, Jacob Coffee</p>
+  
+  <p>
+    Made with
+    
+    <a href="https://www.sphinx-doc.org/">Sphinx</a> and
+    
+    <a href="https://shibuya.lepture.com">Shibuya theme</a>.
+  </p>
+</div>
+      <div class="sy-foot-socials">
+<a href="https://github.com/JacobCoffee/litestar-api-auth" aria-label="GitHub">
+  <iconify-icon icon="simple-icons:github"></iconify-icon>
+</a></div>
+    </div>
+  </div>
+</footer>
+      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=30646c52"></script>
+      <script src="_static/design-tabs.js?v=f930bc37"></script>
+      <script src="_static/shibuya.js?v=cac61aee"></script></body>
+</html>
