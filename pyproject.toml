@@ -17,7 +17,10 @@ docs = [
 ]
 lint = [
     "codespell>=2.2.6",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
     "prek>=0.2.18",
+    "pyright>=1.1.0",
     "ruff>=0.9.0",
     "ty>=0.0.1a7",
 ]
@@ -275,8 +278,12 @@ known-first-party = ["litestar_api_auth", "tests"]
 max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
+"src/litestar_api_auth/backends/base.py" = [
+    "ANN401",   # any-type (kwargs need flexible typing)
+]
 "src/litestar_api_auth/backends/memory.py" = [
     "ARG002",   # unused-method-argument (expires_at for protocol compliance)
+    "ANN401",   # any-type (kwargs need flexible typing)
 ]
 "src/litestar_api_auth/backends/redis.py" = [
     "ARG002",   # unused-method-argument (stub implementation - not yet implemented)
@@ -361,6 +368,7 @@ exclude = [
     "docs/conf.py",
     "tests/",
     "src/litestar_api_auth/backends/",
+    "src/litestar_api_auth/plugin.py",  # complex Litestar type inference
 ]
 
 [tool.uv]
