@@ -73,6 +73,7 @@ html_theme_options = {
 }
 
 html_static_path = ["_static"]
+html_extra_path = ["CNAME"]  # Include CNAME for GitHub Pages custom domain
 html_title = "litestar-api-auth"
 
 # Custom CSS
