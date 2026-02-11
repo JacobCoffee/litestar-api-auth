@@ -227,9 +227,9 @@ worktree-prune: ## Clean up stale git worktrees
 
 ##@ Examples
 
-example-minimal: ## Run the minimal example app (port 8000)
-	@echo "=> Running minimal example at http://127.0.0.1:8000"
-	@$(UV) run uvicorn examples.minimal.app:app --reload --port 8000
+example-minimal: ## Run the minimal example app (port 8005)
+	@echo "=> Running minimal example at http://127.0.0.1:8005"
+	@$(UV) run uvicorn examples.minimal.app:app --reload --port 8005
 
 example-full: ## Run the full example app (port 8001)
 	@echo "=> Running full example at http://127.0.0.1:8001"
