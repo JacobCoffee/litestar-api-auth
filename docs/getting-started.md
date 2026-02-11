@@ -174,7 +174,7 @@ For production, use the SQLAlchemy backend with your existing database:
 from sqlalchemy.ext.asyncio import create_async_engine
 from litestar import Litestar
 from litestar_api_auth import APIAuthPlugin, APIAuthConfig
-from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend
+from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
 # Create engine (use your actual database URL)
 engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/myapp")
@@ -184,7 +184,9 @@ app = Litestar(
     plugins=[
         APIAuthPlugin(
             config=APIAuthConfig(
-                backend=SQLAlchemyBackend(engine),
+                backend=SQLAlchemyBackend(
+                    config=SQLAlchemyConfig(engine=engine)
+                ),
                 key_prefix="prod_",
                 auto_routes=True,
                 route_prefix="/api/v1/api-keys",
@@ -215,9 +217,10 @@ For sensitive configuration, use environment variables:
 ```python
 import os
 from litestar_api_auth import APIAuthConfig
+from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
 config = APIAuthConfig(
-    backend=SQLAlchemyBackend(engine),
+    backend=SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine)),
     key_prefix=os.environ.get("API_KEY_PREFIX", "api_"),
 )
 ```

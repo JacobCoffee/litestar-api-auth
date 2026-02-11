@@ -42,6 +42,9 @@ Quick Navigation
 * :class:`~litestar_api_auth.backends.base.APIKeyInfo` - Backend key info
 * :class:`~litestar_api_auth.backends.memory.MemoryBackend` - In-memory (testing/development)
 * :class:`~litestar_api_auth.backends.sqlalchemy.SQLAlchemyBackend` - SQLAlchemy backend
+* :class:`~litestar_api_auth.backends.sqlalchemy.APIKeyModel` - SQLAlchemy ORM model (Advanced Alchemy)
+* :class:`~litestar_api_auth.backends.sqlalchemy.APIKeyRepository` - Async repository (Advanced Alchemy)
+* :class:`~litestar_api_auth.backends.sqlalchemy.APIKeyService` - Async service (Advanced Alchemy)
 * :class:`~litestar_api_auth.backends.redis.RedisBackend` - Redis backend
 
 **Service Functions**

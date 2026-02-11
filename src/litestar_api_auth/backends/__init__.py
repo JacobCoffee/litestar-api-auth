@@ -29,10 +29,10 @@ Example:
     ```
 """
 
+from __future__ import annotations
+
 from litestar_api_auth.backends.base import APIKeyBackend, APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend, MemoryConfig
-from litestar_api_auth.backends.redis import RedisBackend, RedisConfig
-from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
 __all__ = (
     # Protocol
@@ -42,9 +42,35 @@ __all__ = (
     "MemoryBackend",
     "MemoryConfig",
     # SQLAlchemy backend
+    "APIKeyModel",
+    "APIKeyRepository",
+    "APIKeyService",
     "SQLAlchemyBackend",
     "SQLAlchemyConfig",
     # Redis backend
     "RedisBackend",
     "RedisConfig",
 )
+
+
+def __getattr__(name: str) -> object:
+    """Lazy-load optional backends so missing deps don't cause ImportError.
+
+    This allows ``from litestar_api_auth.backends import MemoryBackend`` to work
+    even when ``sqlalchemy`` or ``redis`` are not installed.
+    """
+    _sqlalchemy_names = {"APIKeyModel", "APIKeyRepository", "APIKeyService", "SQLAlchemyBackend", "SQLAlchemyConfig"}
+    _redis_names = {"RedisBackend", "RedisConfig"}
+
+    if name in _sqlalchemy_names:
+        from litestar_api_auth.backends import sqlalchemy as _sa
+
+        return getattr(_sa, name)
+
+    if name in _redis_names:
+        from litestar_api_auth.backends import redis as _redis
+
+        return getattr(_redis, name)
+
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)

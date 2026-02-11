@@ -1,27 +1,148 @@
-"""SQLAlchemy storage backend for API keys.
+"""SQLAlchemy storage backend for API keys using Advanced Alchemy.
 
-This backend stores API keys in a relational database using SQLAlchemy Core.
-Supports PostgreSQL, MySQL, SQLite, and any other database supported by SQLAlchemy.
+This backend stores API keys in a relational database using Advanced Alchemy's
+Model → Repository → Service pattern. Supports PostgreSQL, MySQL, SQLite, and
+any other database supported by SQLAlchemy.
 
 Note:
-    This module requires the `sqlalchemy` optional dependency:
-    `pip install litestar-api-auth[sqlalchemy]`
+    This module requires the ``sqlalchemy`` optional dependency:
+    ``pip install litestar-api-auth[sqlalchemy]``
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from advanced_alchemy.base import BigIntBase
+from advanced_alchemy.repository import SQLAlchemyAsyncRepository
+from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
+from advanced_alchemy.types import DateTimeUTC, JsonB
+from sqlalchemy import String
+from sqlalchemy.orm import Mapped, mapped_column
 
 from litestar_api_auth.backends.base import APIKeyInfo
 
 if TYPE_CHECKING:
-    from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-__all__ = ("SQLAlchemyBackend", "SQLAlchemyConfig")
+__all__ = ("APIKeyModel", "APIKeyRepository", "APIKeyService", "SQLAlchemyBackend", "SQLAlchemyConfig")
+
+
+class _APIKeyModelBase(BigIntBase):
+    """Abstract base for the API key ORM model.
+
+    Columns are defined here so that subclasses with different ``__tablename__``
+    values do not trigger SQLAlchemy joined-table inheritance.
+    """
+
+    __abstract__ = True
+
+    key_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    key_hash: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    scopes: Mapped[list[Any]] = mapped_column(JsonB, default=list)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTimeUTC, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTimeUTC, nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTimeUTC, nullable=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column("metadata_", JsonB, nullable=True)
+
+
+class APIKeyModel(_APIKeyModelBase):
+    """SQLAlchemy ORM model for API keys.
+
+    Uses Advanced Alchemy's ``BigIntBase`` which provides an auto-increment
+    ``id`` primary key. The ``key_id`` and ``key_hash`` fields serve as the
+    external identifiers.
+    """
+
+    __tablename__ = "api_keys"
+
+
+_model_cache: dict[tuple[str, str | None], type[_APIKeyModelBase]] = {}
+
+
+def _create_api_key_model(table_name: str, *, schema: str | None = None) -> type[_APIKeyModelBase]:
+    """Create a concrete model class with a custom table name (and optional schema).
+
+    Results are cached so that creating multiple backend instances with the same
+    ``(table_name, schema)`` pair reuses the same model class, avoiding
+    SQLAlchemy "already defined for this MetaData" errors.
+
+    Args:
+        table_name: Name of the database table.
+        schema: Optional database schema name.
+
+    Returns:
+        A new (or cached) model class bound to the given table name.
+    """
+    cache_key = (table_name, schema)
+    if cache_key in _model_cache:
+        return _model_cache[cache_key]
+
+    attrs: dict[str, Any] = {"__tablename__": table_name}
+    if schema is not None:
+        attrs["__table_args__"] = {"schema": schema}
+
+    model = type(f"APIKeyModel_{table_name}", (_APIKeyModelBase,), attrs)
+    _model_cache[cache_key] = model
+    return model
+
+
+class APIKeyRepository(SQLAlchemyAsyncRepository[APIKeyModel]):
+    """Advanced Alchemy repository for API key data access.
+
+    Handles all direct database operations. Subclass this to add custom
+    query methods (e.g. ``find_by_scope``, ``find_expired``).
+    """
+
+    model_type = APIKeyModel
+
+
+class APIKeyService(SQLAlchemyAsyncRepositoryService[APIKeyModel]):
+    """Advanced Alchemy service for API key business logic.
+
+    Sits on top of :class:`APIKeyRepository` and provides automatic session
+    management, dict-to-model conversion, and a place for domain logic.
+
+    The service is instantiated per-request with an async session and handles
+    commits, rollbacks, and the unit-of-work pattern automatically.
+
+    Example:
+        ```python
+        async with sessionmaker() as session:
+            service = APIKeyService(session=session)
+            model = await service.create({"key_id": "...", "name": "My Key", ...})
+            results, count = await service.list_and_count(LimitOffset(10, 0))
+        ```
+    """
+
+    repository_type = APIKeyRepository
+    match_fields: ClassVar[list[str]] = ["key_id"]
+
+
+def _model_to_info(model: _APIKeyModelBase) -> APIKeyInfo:
+    """Convert an ORM model instance to an APIKeyInfo struct.
+
+    Args:
+        model: An APIKeyModel instance.
+
+    Returns:
+        An APIKeyInfo populated from the model.
+    """
+    return APIKeyInfo(
+        key_id=model.key_id,
+        key_hash=model.key_hash,
+        name=model.name,
+        scopes=list(model.scopes) if model.scopes else [],
+        is_active=model.is_active,
+        created_at=model.created_at,
+        expires_at=model.expires_at,
+        last_used_at=model.last_used_at,
+        metadata=dict(model.metadata_) if model.metadata_ else None,
+    )
 
 
 @dataclass
@@ -41,76 +162,20 @@ class SQLAlchemyConfig:
     create_tables: bool = True
 
 
-def _build_api_keys_table(table_name: str, schema: str | None = None) -> Table:
-    """Build the SQLAlchemy Table definition for API keys.
-
-    Args:
-        table_name: Name of the database table.
-        schema: Optional database schema name.
-
-    Returns:
-        A SQLAlchemy Table object with columns matching APIKeyInfo fields.
-    """
-    from sqlalchemy import Boolean, Column, DateTime, Index, MetaData, String, Table, Text
-
-    metadata = MetaData(schema=schema)
-    table = Table(
-        table_name,
-        metadata,
-        Column("key_id", String(length=255), nullable=False, unique=True),
-        Column("key_hash", String(length=255), nullable=False, unique=True),
-        Column("name", String(length=255), nullable=False),
-        Column("scopes", Text, nullable=False, default="[]"),
-        Column("is_active", Boolean, nullable=False, default=True),
-        Column("created_at", DateTime(timezone=True), nullable=True),
-        Column("expires_at", DateTime(timezone=True), nullable=True),
-        Column("last_used_at", DateTime(timezone=True), nullable=True),
-        Column("metadata_", Text, nullable=True),
-    )
-    Index("ix_api_keys_key_hash", table.c.key_hash)
-    Index("ix_api_keys_key_id", table.c.key_id)
-    return table
-
-
-def _row_to_info(row: Any) -> APIKeyInfo:
-    """Convert a database row mapping to an APIKeyInfo struct.
-
-    Args:
-        row: A SQLAlchemy row mapping from a query result.
-
-    Returns:
-        An APIKeyInfo instance populated from the row data.
-    """
-    scopes_raw = row["scopes"]
-    scopes: list[str] = json.loads(scopes_raw) if isinstance(scopes_raw, str) else (scopes_raw or [])
-
-    metadata_raw = row["metadata_"]
-    metadata: dict[str, Any] | None = None
-    if metadata_raw is not None:
-        metadata = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw
-
-    return APIKeyInfo(
-        key_id=row["key_id"],
-        key_hash=row["key_hash"],
-        name=row["name"],
-        scopes=scopes,
-        is_active=row["is_active"],
-        created_at=row["created_at"],
-        expires_at=row["expires_at"],
-        last_used_at=row["last_used_at"],
-        metadata=metadata,
-    )
-
-
 class SQLAlchemyBackend:
-    """SQLAlchemy storage backend for API keys.
+    """SQLAlchemy storage backend for API keys using Advanced Alchemy.
 
     This implementation stores API keys in a relational database using
-    SQLAlchemy Core with an async engine. It supports all databases that
-    SQLAlchemy supports.
+    Advanced Alchemy's Model → Repository → Service architecture. It supports
+    all databases that SQLAlchemy supports.
+
+    Internally, each backend method opens a session and delegates to
+    :class:`APIKeyService` for the actual CRUD operation. The service handles
+    commits and rollbacks automatically.
 
     Features:
         - Async operations using SQLAlchemy's async engine
+        - Advanced Alchemy Model / Repository / Service for type-safe CRUD
         - Automatic table creation on startup
         - Configurable table and schema names
         - Efficient queries with proper indexing on key_hash and key_id
@@ -133,8 +198,8 @@ class SQLAlchemyBackend:
         ```
 
     Note:
-        This backend requires the `sqlalchemy` optional dependency.
-        Install with: `pip install litestar-api-auth[sqlalchemy]`
+        This backend requires the ``sqlalchemy`` optional dependency.
+        Install with: ``pip install litestar-api-auth[sqlalchemy]``
     """
 
     def __init__(self, config: SQLAlchemyConfig | None = None) -> None:
@@ -142,25 +207,37 @@ class SQLAlchemyBackend:
 
         Args:
             config: Configuration for the backend.
-
-        Raises:
-            ImportError: If SQLAlchemy is not installed.
         """
-        try:
-            import sqlalchemy
-        except ImportError as exc:
-            msg = (
-                "SQLAlchemy is required for SQLAlchemyBackend. "
-                "Install it with: pip install litestar-api-auth[sqlalchemy]"
-            )
-            raise ImportError(msg) from exc
-
         self.config = config or SQLAlchemyConfig()
         self._engine = self.config.engine
-        self._table: Table = _build_api_keys_table(
-            table_name=self.config.table_name,
-            schema=self.config.schema,
-        )
+        self._sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+        if self.config.table_name != "api_keys" or self.config.schema is not None:
+            self._model = _create_api_key_model(self.config.table_name, schema=self.config.schema)
+        else:
+            self._model = APIKeyModel
+
+        if self._engine is not None:
+            self._init_sessionmaker()
+
+    def _init_sessionmaker(self) -> None:
+        """Create the async sessionmaker from the engine."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker as make_session
+
+        self._sessionmaker = make_session(self._engine, expire_on_commit=False)
+
+    def _make_service(self, session: AsyncSession) -> APIKeyService:
+        """Create a service instance bound to the given session.
+
+        Args:
+            session: An async SQLAlchemy session.
+
+        Returns:
+            An APIKeyService for the configured model type.
+        """
+        svc = APIKeyService(session=session)
+        svc.repository.model_type = self._model
+        return svc
 
     async def startup(self) -> None:
         """Initialize the backend on application startup.
@@ -168,19 +245,8 @@ class SQLAlchemyBackend:
         Creates the API keys table if it doesn't exist and create_tables is True.
         """
         if self.config.create_tables and self._engine is not None:
-            await self._create_tables()
-
-    async def _create_tables(self) -> None:
-        """Create the API keys table if it doesn't exist.
-
-        Uses ``run_sync`` to execute the synchronous ``metadata.create_all``
-        within the async engine's connection context.
-        """
-        if self._engine is None:
-            return
-
-        async with self._engine.begin() as conn:
-            await conn.run_sync(self._table.metadata.create_all)
+            async with self._engine.begin() as conn:
+                await conn.run_sync(self._model.metadata.create_all)
 
     async def create(self, key_hash: str, info: APIKeyInfo) -> APIKeyInfo:
         """Create a new API key in the database.
@@ -194,32 +260,37 @@ class SQLAlchemyBackend:
 
         Raises:
             ValueError: If a key with the same hash or ID already exists.
+            RuntimeError: If the engine is not configured.
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             msg = "Engine is not configured. Set config.engine before calling create()."
             raise RuntimeError(msg)
 
+        from advanced_alchemy.exceptions import DuplicateKeyError
         from sqlalchemy.exc import IntegrityError
 
         created_at = info.created_at if info.created_at is not None else datetime.now(timezone.utc)
 
         try:
-            async with self._engine.begin() as conn:
-                await conn.execute(
-                    self._table.insert().values(
-                        key_id=info.key_id,
-                        key_hash=key_hash,
-                        name=info.name,
-                        scopes=json.dumps(info.scopes),
-                        is_active=info.is_active,
-                        created_at=created_at,
-                        expires_at=info.expires_at,
-                        last_used_at=info.last_used_at,
-                        metadata_=json.dumps(info.metadata) if info.metadata is not None else None,
-                    )
+            async with self._sessionmaker() as session:
+                svc = self._make_service(session)
+                result = await svc.create(
+                    {
+                        "key_id": info.key_id,
+                        "key_hash": key_hash,
+                        "name": info.name,
+                        "scopes": list(info.scopes),
+                        "is_active": info.is_active,
+                        "created_at": created_at,
+                        "expires_at": info.expires_at,
+                        "last_used_at": info.last_used_at,
+                        "metadata_": dict(info.metadata) if info.metadata is not None else None,
+                    },
+                    auto_commit=True,
                 )
-        except IntegrityError as exc:
-            detail = str(exc.orig).lower()
+                return _model_to_info(result)
+        except (IntegrityError, DuplicateKeyError) as exc:
+            detail = str(exc).lower()
             if "key_id" in detail:
                 msg = f"API key with ID {info.key_id} already exists"
                 raise ValueError(msg) from exc
@@ -228,18 +299,6 @@ class SQLAlchemyBackend:
                 raise ValueError(msg) from exc
             msg = "API key with the same hash or ID already exists"
             raise ValueError(msg) from exc
-
-        return APIKeyInfo(
-            key_id=info.key_id,
-            key_hash=key_hash,
-            name=info.name,
-            scopes=info.scopes,
-            is_active=info.is_active,
-            created_at=created_at,
-            expires_at=info.expires_at,
-            last_used_at=info.last_used_at,
-            metadata=info.metadata,
-        )
 
     async def get(self, key_hash: str) -> APIKeyInfo | None:
         """Retrieve an API key by its hash.
@@ -250,17 +309,15 @@ class SQLAlchemyBackend:
         Returns:
             The APIKeyInfo if found, None otherwise.
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             return None
 
-        from sqlalchemy import select as sa_select
-
-        async with self._engine.connect() as conn:
-            result = await conn.execute(sa_select(self._table).where(self._table.c.key_hash == key_hash))
-            row = result.mappings().first()
-            if row is None:
+        async with self._sessionmaker() as session:
+            svc = self._make_service(session)
+            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+            if model is None:
                 return None
-            return _row_to_info(row)
+            return _model_to_info(model)
 
     async def get_by_id(self, key_id: str) -> APIKeyInfo | None:
         """Retrieve an API key by its unique ID.
@@ -271,17 +328,15 @@ class SQLAlchemyBackend:
         Returns:
             The APIKeyInfo if found, None otherwise.
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             return None
 
-        from sqlalchemy import select as sa_select
-
-        async with self._engine.connect() as conn:
-            result = await conn.execute(sa_select(self._table).where(self._table.c.key_id == key_id))
-            row = result.mappings().first()
-            if row is None:
+        async with self._sessionmaker() as session:
+            svc = self._make_service(session)
+            model = await svc.get_one_or_none(self._model.key_id == key_id)
+            if model is None:
                 return None
-            return _row_to_info(row)
+            return _model_to_info(model)
 
     async def update(self, key_hash: str, **updates: Any) -> APIKeyInfo | None:
         """Update an API key's metadata.
@@ -293,30 +348,26 @@ class SQLAlchemyBackend:
         Returns:
             The updated APIKeyInfo if found, None otherwise.
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             return None
 
-        # Map Python field names to column values, serializing as needed
-        column_updates: dict[str, Any] = {}
-        for field, value in updates.items():
-            if field == "scopes":
-                column_updates["scopes"] = json.dumps(value)
-            elif field == "metadata":
-                column_updates["metadata_"] = json.dumps(value) if value is not None else None
-            else:
-                column_updates[field] = value
-
-        if not column_updates:
-            return await self.get(key_hash)
-
-        async with self._engine.begin() as conn:
-            result = await conn.execute(
-                self._table.update().where(self._table.c.key_hash == key_hash).values(**column_updates)
-            )
-            if result.rowcount == 0:
+        async with self._sessionmaker() as session:
+            svc = self._make_service(session)
+            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+            if model is None:
                 return None
 
-        return await self.get(key_hash)
+            # Map the "metadata" kwarg to the model's "metadata_" column
+            update_data: dict[str, Any] = {}
+            for field, value in updates.items():
+                if field == "metadata":
+                    update_data["metadata_"] = value
+                else:
+                    update_data[field] = value
+
+            update_data["id"] = model.id
+            result = await svc.update(update_data, item_id=model.id, auto_commit=True)
+            return _model_to_info(result)
 
     async def delete(self, key_hash: str) -> bool:
         """Delete an API key from the database.
@@ -327,12 +378,16 @@ class SQLAlchemyBackend:
         Returns:
             True if the key was deleted, False if not found.
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             return False
 
-        async with self._engine.begin() as conn:
-            result = await conn.execute(self._table.delete().where(self._table.c.key_hash == key_hash))
-            return result.rowcount > 0  # type: ignore[return-value]
+        async with self._sessionmaker() as session:
+            svc = self._make_service(session)
+            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+            if model is None:
+                return False
+            await svc.delete(model.id, auto_commit=True)
+            return True
 
     async def list(
         self,
@@ -353,21 +408,26 @@ class SQLAlchemyBackend:
         Returns:
             List of APIKeyInfo objects sorted by creation date (newest first).
         """
-        if self._engine is None:
+        if self._sessionmaker is None:
             return []
 
-        from sqlalchemy import select as sa_select
+        from advanced_alchemy.filters import LimitOffset, OrderBy
 
-        query = (
-            sa_select(self._table).order_by(self._table.c.created_at.desc(), self._table.c.key_id.desc()).offset(offset)
-        )
+        filters: list[LimitOffset | OrderBy] = [
+            OrderBy(field_name="created_at", sort_order="desc"),
+            OrderBy(field_name="key_id", sort_order="desc"),
+        ]
         if limit is not None:
-            query = query.limit(limit)
+            filters.append(LimitOffset(limit=limit, offset=offset))
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(query)
-            rows = result.mappings().all()
-            return [_row_to_info(row) for row in rows]
+        async with self._sessionmaker() as session:
+            svc = self._make_service(session)
+            results = await svc.list(*filters)
+            # When offset is requested without a limit, slice in Python to
+            # avoid LIMIT -1 which is invalid on PostgreSQL/MySQL.
+            if limit is None and offset > 0:
+                results = results[offset:]
+            return [_model_to_info(m) for m in results]
 
     async def revoke(self, key_hash: str) -> bool:
         """Revoke an API key (mark as inactive).

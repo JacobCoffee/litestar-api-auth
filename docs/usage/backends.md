@@ -31,8 +31,16 @@ Keys are lost when the application restarts. Do not use in production.
 
 ## SQLAlchemy Backend
 
-The SQLAlchemy backend persists keys to a relational database. It supports
-PostgreSQL, MySQL, SQLite, and any other database supported by SQLAlchemy.
+The SQLAlchemy backend persists keys to a relational database. It is powered by
+[Advanced Alchemy](https://docs.advanced-alchemy.litestar.dev/) and follows its
+**Model → Repository → Service** architecture:
+
+- **Model** ({class}`~litestar_api_auth.backends.sqlalchemy.APIKeyModel`) -- ORM model with `BigIntBase`
+- **Repository** ({class}`~litestar_api_auth.backends.sqlalchemy.APIKeyRepository`) -- type-safe async data access
+- **Service** ({class}`~litestar_api_auth.backends.sqlalchemy.APIKeyService`) -- business logic, automatic session/commit management, dict-to-model conversion
+
+It supports PostgreSQL, MySQL, SQLite, and any other database supported by
+SQLAlchemy.
 
 Install the optional dependency first:
 
@@ -71,6 +79,183 @@ config = APIAuthConfig(
 | `table_name`    | `str`                  | `"api_keys"` | Name of the table that stores API keys.           |
 | `schema`        | `str \| None`          | `None`       | Optional database schema name.                    |
 | `create_tables` | `bool`                 | `True`       | Create the table on startup if it does not exist. |
+
+### Database Schema
+
+The {class}`~litestar_api_auth.backends.sqlalchemy.APIKeyModel` ORM model extends
+Advanced Alchemy's `BigIntBase`, which provides an auto-increment `id` primary key.
+The remaining columns map directly to the fields on
+{class}`~litestar_api_auth.backends.base.APIKeyInfo`:
+
+| Column         | Type                          | Notes                                                    |
+|----------------|-------------------------------|----------------------------------------------------------|
+| `id`           | `BigInteger` (PK)             | Auto-increment primary key from `BigIntBase`.            |
+| `key_id`       | `String(255)`                 | Unique, indexed. UUID identifier for the key.            |
+| `key_hash`     | `String(255)`                 | Unique, indexed. SHA-256 hash of the raw key.            |
+| `name`         | `String(255)`                 | Human-readable label.                                    |
+| `scopes`       | `JsonB`                       | JSON array of permission scopes.                         |
+| `is_active`    | `Boolean`                     | Defaults to `True`.                                      |
+| `created_at`   | `DateTimeUTC` (nullable)      | Timezone-aware creation timestamp.                       |
+| `expires_at`   | `DateTimeUTC` (nullable)      | Optional expiration timestamp.                           |
+| `last_used_at` | `DateTimeUTC` (nullable)      | Updated on each authenticated request.                   |
+| `metadata_`    | `JsonB` (nullable)            | Arbitrary key-value metadata. Maps to `metadata` on `APIKeyInfo`. |
+
+`DateTimeUTC` and `JsonB` are portable Advanced Alchemy column types that
+adapt automatically to each database dialect (e.g. native `jsonb` on PostgreSQL,
+`JSON` on MySQL/SQLite).
+
+### Advanced Usage: Model → Repository → Service
+
+The SQLAlchemy backend is built on [Advanced Alchemy](https://docs.advanced-alchemy.litestar.dev/)
+and exposes the full Model → Repository → Service stack for advanced customization:
+
+- {class}`~litestar_api_auth.backends.sqlalchemy.APIKeyModel` -- the SQLAlchemy ORM model (extends `BigIntBase`)
+- {class}`~litestar_api_auth.backends.sqlalchemy.APIKeyRepository` -- the async repository (extends `SQLAlchemyAsyncRepository`)
+- {class}`~litestar_api_auth.backends.sqlalchemy.APIKeyService` -- the async service (extends `SQLAlchemyAsyncRepositoryService`)
+
+The **service** layer sits on top of the repository and adds:
+- Automatic session and transaction management (commits, rollbacks)
+- Dict-to-model conversion (pass a `dict` instead of constructing a model)
+- Unit-of-work pattern with `auto_commit` control
+- A `match_fields` option for upsert-style operations
+
+#### Subclassing the Model
+
+Add custom columns, relationships, or constraints by subclassing
+{class}`~litestar_api_auth.backends.sqlalchemy.APIKeyModel`:
+
+```python
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from litestar_api_auth.backends.sqlalchemy import APIKeyModel
+
+class MyAPIKeyModel(APIKeyModel):
+    """API key model with an owner relationship."""
+
+    __tablename__ = "my_api_keys"
+
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    owner: Mapped["User"] = relationship(lazy="joined")
+```
+
+#### Custom Repository with Additional Queries
+
+Create a custom {class}`~litestar_api_auth.backends.sqlalchemy.APIKeyRepository`
+subclass to add domain-specific query methods:
+
+```python
+from advanced_alchemy.filters import LimitOffset, OrderBy
+from advanced_alchemy.repository import SQLAlchemyAsyncRepository
+from litestar_api_auth.backends.sqlalchemy import APIKeyModel
+
+class MyAPIKeyRepository(SQLAlchemyAsyncRepository[APIKeyModel]):
+    """Repository with custom query helpers."""
+
+    model_type = APIKeyModel
+
+    async def find_by_scope(
+        self,
+        scope: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[APIKeyModel]:
+        """Find active keys that contain a specific scope.
+
+        Args:
+            scope: The scope string to search for (e.g. ``"admin:write"``).
+            limit: Maximum number of results.
+            offset: Number of results to skip.
+
+        Returns:
+            List of matching APIKeyModel instances.
+        """
+        from sqlalchemy import cast, String as SAString
+
+        return await self.list(
+            APIKeyModel.is_active == True,  # noqa: E712
+            cast(APIKeyModel.scopes, SAString).contains(scope),
+            LimitOffset(limit=limit, offset=offset),
+            OrderBy(field_name="created_at", sort_order="desc"),
+        )
+
+    async def find_expired(self) -> list[APIKeyModel]:
+        """Find all keys that have passed their expiration date."""
+        from datetime import datetime, timezone
+
+        return await self.list(
+            APIKeyModel.expires_at < datetime.now(timezone.utc),
+            APIKeyModel.is_active == True,  # noqa: E712
+        )
+```
+
+#### Using the Service Directly
+
+{class}`~litestar_api_auth.backends.sqlalchemy.APIKeyService` wraps the repository
+and adds automatic session management, dict-to-model conversion, and commit handling.
+This is what the backend itself uses internally:
+
+```python
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from litestar_api_auth.backends.sqlalchemy import APIKeyService
+
+engine = create_async_engine("postgresql+asyncpg://...")
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+async with session_factory() as session:
+    service = APIKeyService(session=session)
+
+    # Create from a dict -- the service handles model construction
+    new_key = await service.create(
+        {"key_id": "abc-123", "key_hash": "sha256...", "name": "My Key", "scopes": ["read"]},
+        auto_commit=True,
+    )
+
+    # Query with Advanced Alchemy filters
+    from advanced_alchemy.filters import LimitOffset, OrderBy
+
+    results = await service.list(
+        LimitOffset(limit=20, offset=0),
+        OrderBy(field_name="created_at", sort_order="desc"),
+    )
+
+    # Update by passing a dict with the item_id
+    updated = await service.update(
+        {"name": "Renamed Key", "id": new_key.id},
+        item_id=new_key.id,
+        auto_commit=True,
+    )
+
+    # Delete by primary key
+    await service.delete(new_key.id, auto_commit=True)
+```
+
+#### Using the Repository Directly
+
+For lower-level access without the service overhead, use
+{class}`~litestar_api_auth.backends.sqlalchemy.APIKeyRepository` directly:
+
+```python
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from litestar_api_auth.backends.sqlalchemy import APIKeyModel, APIKeyRepository
+
+engine = create_async_engine("postgresql+asyncpg://...")
+session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+async with session_factory() as session:
+    repo = APIKeyRepository(session=session)
+
+    # Use Advanced Alchemy's built-in methods
+    key = await repo.get_one_or_none(APIKeyModel.key_id == "some-uuid")
+
+    # Paginate with Advanced Alchemy filters
+    from advanced_alchemy.filters import LimitOffset, OrderBy
+
+    keys = await repo.list(
+        LimitOffset(limit=20, offset=0),
+        OrderBy(field_name="created_at", sort_order="desc"),
+    )
+```
 
 ## Redis Backend
 

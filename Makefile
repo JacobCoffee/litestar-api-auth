@@ -140,7 +140,7 @@ docs: docs-clean ## Build documentation
 docs-serve: docs-clean ## Serve documentation with live reload
 	@echo "=> Serving documentation"
 	@$(UV) sync --group docs
-	@$(UV) run sphinx-autobuild docs docs/_build/ -j auto --port 8001
+	@$(UV) run sphinx-autobuild docs docs/_build/ -j auto --port 0
 
 docs-clean: ## Clean built documentation
 	@echo "=> Cleaning documentation build assets"
