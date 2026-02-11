@@ -9,6 +9,8 @@ Run with:
 
 from __future__ import annotations
 
+from typing import Any
+
 from litestar import Litestar, Request, get
 
 from litestar_api_auth import (
@@ -35,14 +37,15 @@ async def protected() -> dict[str, str]:
 
 
 @get("/me", guards=[require_api_key])
-async def whoami(request: Request) -> dict[str, object]:
+async def whoami(request: Request) -> dict[str, Any]:
     """Return information about the current API key."""
     key_info = get_api_key_info(request)
     return {
         "key_id": key_info.key_id,
         "name": key_info.name,
         "scopes": key_info.scopes,
-        "state": key_info.state.value,
+        "is_active": key_info.is_active,
+        "is_expired": key_info.is_expired,
     }
 
 
