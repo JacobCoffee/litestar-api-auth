@@ -234,47 +234,48 @@ class APIAuthPlugin(InitPluginProtocol):
             app_config: The application configuration to modify.
         """
 
+        import inspect
+
         from litestar import Litestar
 
         # Store original lifespan hooks
         original_on_startup = app_config.on_startup
         original_on_shutdown = app_config.on_shutdown
 
+        async def _call_hook(hook: Any, app: Litestar) -> None:
+            """Call a lifespan hook, handling both (app) and () signatures."""
+            try:
+                sig = inspect.signature(hook)
+                params = [p for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
+                result = hook(app) if params else hook()
+            except (ValueError, TypeError):
+                result = hook(app)
+            if hasattr(result, "__await__"):
+                await result
+
         async def on_startup(app: Litestar) -> None:
             """Initialize the backend on application startup."""
-            # Call backend startup if it has one
             if hasattr(self.config.backend, "startup"):
                 await self.config.backend.startup()  # type: ignore[attr-defined]
 
-            # Call original startup hooks
             if original_on_startup:
                 if callable(original_on_startup):
-                    result = original_on_startup(app)
-                    if hasattr(result, "__await__"):
-                        await result
+                    await _call_hook(original_on_startup, app)
                 else:
                     for hook in original_on_startup:
-                        result = hook(app)  # type: ignore[call-arg]
-                        if hasattr(result, "__await__"):
-                            await result
+                        await _call_hook(hook, app)
 
         async def on_shutdown(app: Litestar) -> None:
             """Clean up the backend on application shutdown."""
-            # Call backend cleanup
             if hasattr(self.config.backend, "close"):
                 await self.config.backend.close()  # type: ignore[attr-defined]
 
-            # Call original shutdown hooks
             if original_on_shutdown:
                 if callable(original_on_shutdown):
-                    result = original_on_shutdown(app)
-                    if hasattr(result, "__await__"):
-                        await result
+                    await _call_hook(original_on_shutdown, app)
                 else:
                     for hook in original_on_shutdown:
-                        result = hook(app)  # type: ignore[call-arg]
-                        if hasattr(result, "__await__"):
-                            await result
+                        await _call_hook(hook, app)
 
         # Replace lifespan hooks
         app_config.on_startup = [on_startup]  # type: ignore[list-item]
