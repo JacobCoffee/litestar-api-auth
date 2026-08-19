@@ -134,7 +134,7 @@ test-failed: ## Re-run only failed tests from last run
 
 docs: docs-clean ## Build documentation
 	@echo "=> Building documentation"
-	@$(UV) sync --group docs
+	@$(UV) sync --group docs --locked
 	@$(UV) run sphinx-build -M html docs docs/_build/ -E -a -j auto --keep-going
 
 docs-serve: docs-clean ## Serve documentation with live reload

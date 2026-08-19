@@ -14,6 +14,13 @@ manifest.
 This test parameterizes over every workflow file (not just ``ci.yml``), so
 it also guards the "every dependency install is reproducible, or the job
 fails" convention against regressing in any workflow, present or future.
+
+``docs.yml``'s ``build`` job has a second, indirect sync: after its own
+``uv sync --all-extras --dev --locked`` step, it runs ``uv run make docs``,
+which shells out to the ``docs`` target in the repo ``Makefile`` --  and that
+target runs its own ``uv sync --group docs``. A ``--locked`` flag on the
+workflow step alone doesn't cover that second sync, so it is checked
+separately here.
 """
 
 from __future__ import annotations
@@ -23,10 +30,13 @@ from pathlib import Path
 
 import pytest
 
-WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
+REPO_ROOT = Path(__file__).parent.parent
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
 WORKFLOW_FILES = sorted({*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")})
+MAKEFILE = REPO_ROOT / "Makefile"
 
 _UV_SYNC_RE = re.compile(r"^\s*run:\s*(uv sync[^\n]*)$", re.MULTILINE)
+_MAKE_DOCS_SYNC_RE = re.compile(r"^docs:.*\n(?:\t.*\n)*?\t@\$\(UV\) (sync[^\n]*)$", re.MULTILINE)
 
 
 def _uv_sync_commands(workflow_text: str) -> list[str]:
@@ -55,3 +65,25 @@ class TestUvSyncStepsAreLocked:
                 f"{workflow_path.name}: {command!r} does not pass --locked, "
                 "so a stale uv.lock would be silently re-resolved instead of failing CI"
             )
+
+
+class TestMakeDocsSyncIsLocked:
+    """``docs.yml``'s ``build`` job runs ``uv run make docs``, which re-enters ``uv sync``
+    via the Makefile's own ``docs`` target -- that sync must also pass ``--locked``.
+
+    Before this fix, the ``docs`` target ran ``uv sync --group docs`` with no
+    ``--locked`` flag, so even after locking the workflow step's own sync, this
+    second, Makefile-driven sync could still silently re-resolve a stale
+    ``uv.lock``. This assertion would have failed against that version of the
+    ``Makefile``.
+    """
+
+    @pytest.mark.unit
+    def test_docs_target_sync_is_locked(self) -> None:
+        match = _MAKE_DOCS_SYNC_RE.search(MAKEFILE.read_text())
+        assert match, "Makefile: could not find the 'docs' target's '$(UV) sync' step"
+        assert "--locked" in match.group(1).split(), (
+            f"Makefile: docs target runs '$(UV) {match.group(1)}' without --locked, "
+            "so 'uv run make docs' in docs.yml's build job could still silently "
+            "re-resolve a stale uv.lock"
+        )
