@@ -7,6 +7,7 @@ request state for use by guards.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Protocol
 
 import msgspec
@@ -147,13 +148,32 @@ class APIKeyMiddleware(AbstractMiddleware):
         if api_key:
             try:
                 key_info = await self._validate_api_key(api_key)
+
+                # Update last used timestamp if enabled. This stays inside the
+                # same try as validation -- and state["api_key"] is only ever
+                # populated in the `else` clause below -- so a race-aware
+                # custom backend raising APIKeyNotFoundError/APIKeyExpiredError/
+                # APIKeyRevokedError/InvalidAPIKeyError here (e.g. detecting a
+                # concurrent revocation or deletion) is handled the same way a
+                # validation failure is, instead of leaving a just-invalidated
+                # key authenticated because state was already set beforehand.
+                if self.update_last_used:
+                    key_hash = self._hash_api_key(api_key)
+                    with contextlib.suppress(RuntimeError):
+                        # Usage tracking is best-effort: a backend that raises
+                        # RuntimeError here (e.g. Redis exhausting its
+                        # WATCH/MULTI retries under heavy write contention on
+                        # this key) must not turn an otherwise valid,
+                        # already-authenticated request into a failure.
+                        await self.backend.update_last_used(key_hash)
             except (
                 APIKeyNotFoundError,
                 APIKeyExpiredError,
                 APIKeyRevokedError,
                 InvalidAPIKeyError,
             ):
-                # state["api_key"] stays None (cleared above) if validation fails
+                # state["api_key"] stays None (cleared above) if validation
+                # (or a race-aware update_last_used()) fails.
                 # Guards will handle the missing key appropriately
                 pass
             else:
@@ -164,32 +184,6 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # guards.get_api_key_info's docstring) would otherwise
                 # serialize the hash into the HTTP response.
                 scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
-
-                # Update last used timestamp if enabled. This is deliberately
-                # outside the except above: it runs only after state["api_key"]
-                # is already populated, so a race-aware custom backend raising
-                # APIKeyRevokedError/APIKeyExpiredError here (e.g. detecting a
-                # concurrent revocation) must clear that state itself instead
-                # of being caught by the validation except block, which would
-                # otherwise leave the just-revoked/expired key authenticated.
-                if self.update_last_used:
-                    key_hash = self._hash_api_key(api_key)
-                    try:
-                        await self.backend.update_last_used(key_hash)
-                    except RuntimeError:
-                        # Usage tracking is best-effort: a backend that raises
-                        # RuntimeError here (e.g. Redis exhausting its
-                        # WATCH/MULTI retries under heavy write contention on
-                        # this key) must not turn an otherwise valid,
-                        # already-authenticated request into a failure.
-                        pass
-                    except (APIKeyRevokedError, APIKeyExpiredError):
-                        # A race-aware backend can detect concurrent
-                        # revocation/expiry here, after already reporting the
-                        # key as active from _validate_api_key. Clear the
-                        # state so the request is not treated as
-                        # authenticated.
-                        scope["state"]["api_key"] = None
 
         # Continue processing the request
         await self.app(scope, receive, send)

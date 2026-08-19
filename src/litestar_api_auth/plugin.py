@@ -290,28 +290,30 @@ class APIAuthPlugin(InitPluginProtocol):
         Args:
             app_config: The application configuration to modify.
         """
-        from litestar_api_auth.controllers import APIKeyController
-
-        # Create a dynamic controller class with the correct path and guards.
-        # Key management is a privileged operation (a caller who can create
-        # keys can mint arbitrary scopes), so it must be guarded even though
-        # these routes are auto-registered.
-        class ConfiguredAPIKeyController(APIKeyController):
-            path = self.config.route_prefix  # type: ignore[misc]
-            guards = self.config.management_guards  # type: ignore[misc]
-
-        # Store backend reference for dependency injection
         from litestar.di import Provide
+
+        from litestar_api_auth.controllers import APIKeyController
 
         backend = self.config.backend
 
         def provide_controller_backend() -> APIKeyBackend:
             return backend
 
-        # Register backend dependency for controller
-        if app_config.dependencies is None:
-            app_config.dependencies = {}
-        app_config.dependencies["backend"] = Provide(provide_controller_backend, sync_to_thread=False)
+        # Create a dynamic controller class with the correct path and guards.
+        # Key management is a privileged operation (a caller who can create
+        # keys can mint arbitrary scopes), so it must be guarded even though
+        # these routes are auto-registered.
+        #
+        # The "backend" dependency is set on the controller itself (scoped to
+        # its own routes) rather than merged into app_config.dependencies --
+        # the latter would register it app-wide, silently overwriting any
+        # user-provided app-level "backend" dependency and injecting
+        # APIKeyBackend into every unrelated handler that happens to declare
+        # a "backend" parameter.
+        class ConfiguredAPIKeyController(APIKeyController):
+            path = self.config.route_prefix  # type: ignore[misc]
+            guards = self.config.management_guards  # type: ignore[misc]
+            dependencies = {"backend": Provide(provide_controller_backend, sync_to_thread=False)}  # type: ignore[misc]
 
         # Add to route handlers
         if app_config.route_handlers is None:

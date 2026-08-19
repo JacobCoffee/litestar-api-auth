@@ -12,7 +12,12 @@ from typing import Any
 
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend
-from litestar_api_auth.exceptions import APIKeyExpiredError, APIKeyRevokedError
+from litestar_api_auth.exceptions import (
+    APIKeyExpiredError,
+    APIKeyNotFoundError,
+    APIKeyRevokedError,
+    InvalidAPIKeyError,
+)
 from litestar_api_auth.middleware import APIKeyMiddleware
 from litestar_api_auth.service import generate_api_key
 
@@ -187,16 +192,35 @@ class _ExpiredDuringUpdateBackend(MemoryBackend):
         raise APIKeyExpiredError(key_id="raced-out")
 
 
+class _NotFoundDuringUpdateBackend(MemoryBackend):
+    """A race-aware backend that detects concurrent deletion inside update_last_used()."""
+
+    async def update_last_used(self, key_hash: str) -> None:
+        raise APIKeyNotFoundError(key_id="raced-out")
+
+
+class _InvalidDuringUpdateBackend(MemoryBackend):
+    """A backend whose update_last_used() rejects the key as invalid.
+
+    Exercises the fourth member of the validation-exception tuple so all of
+    it, not just the revocation/expiry cases, is proven to clear state.
+    """
+
+    async def update_last_used(self, key_hash: str) -> None:
+        raise InvalidAPIKeyError(reason="raced-out")
+
+
 class TestUpdateLastUsedRevocationRaceIsNotSwallowed:
     """Regression tests for the revocation-race finding.
 
     Before the fix, ``update_last_used()`` ran inside the same try block that
-    caught ``APIKeyRevokedError``/``APIKeyExpiredError`` from validation, and
-    by the time it ran, ``state["api_key"]`` had already been populated. A
-    race-aware custom backend raising either exception from
-    ``update_last_used()`` (e.g. after detecting a concurrent revocation) was
-    silently swallowed, and the just-revoked/expired key's request reached
-    guarded handlers still authenticated.
+    caught ``APIKeyNotFoundError``/``APIKeyExpiredError``/``APIKeyRevokedError``/
+    ``InvalidAPIKeyError`` from validation, but only *after*
+    ``state["api_key"]`` had already been populated. A race-aware custom
+    backend raising any of those exceptions from ``update_last_used()`` (e.g.
+    after detecting a concurrent revocation or deletion) was silently
+    swallowed, and the just-invalidated key's request reached guarded
+    handlers still authenticated.
     """
 
     async def test_revocation_detected_during_update_clears_state(self) -> None:
@@ -219,6 +243,38 @@ class TestUpdateLastUsedRevocationRaceIsNotSwallowed:
     async def test_expiry_detected_during_update_clears_state(self) -> None:
         """APIKeyExpiredError from update_last_used() must clear state["api_key"]."""
         backend = _ExpiredDuringUpdateBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_not_found_detected_during_update_clears_state(self) -> None:
+        """APIKeyNotFoundError from update_last_used() must clear state["api_key"]."""
+        backend = _NotFoundDuringUpdateBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_invalid_key_detected_during_update_clears_state(self) -> None:
+        """InvalidAPIKeyError from update_last_used() must clear state["api_key"]."""
+        backend = _InvalidDuringUpdateBackend()
         raw_key, key_hash = generate_api_key(prefix="test_")
         await backend.create(
             key_hash,
