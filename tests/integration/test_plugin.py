@@ -1050,3 +1050,104 @@ class TestMultipleInstancesRejected:
                     RenamedDependencyKeyPlugin(config=APIAuthConfig(backend=partner_backend, auto_routes=False)),
                 ],
             )
+
+
+class _UserStorage:
+    """Stand-in for an app owner's own unrelated 'backend', e.g. object storage.
+
+    Defined at module scope (rather than inline in the test) so it resolves
+    as a type annotation under this module's ``from __future__ import
+    annotations``.
+    """
+
+
+class TestAutoRoutesDoNotClobberAppLevelBackendDependency:
+    """Regression test: ``auto_routes`` must not overwrite a user-defined
+    app-level ``"backend"`` dependency.
+
+    Before the fix, ``_register_routes`` unconditionally wrote
+    ``app_config.dependencies["backend"] = Provide(...)`` pointing at the
+    plugin's ``APIKeyBackend`` -- clobbering any app-level ``"backend"``
+    dependency the app owner had already defined and injecting the API key
+    store into every unrelated handler that happens to declare a ``backend``
+    parameter (e.g. a handler meaning to receive its own object storage,
+    which could then delete API keys instead of the objects it intended).
+    """
+
+    @pytest.mark.integration
+    async def test_unrelated_handler_still_receives_its_own_backend_dependency(
+        self, backend: MemoryBackend
+    ) -> None:
+        """A pre-existing app-level "backend" dependency must reach an
+        unrelated handler unchanged, even with auto_routes management
+        routes registered."""
+        from litestar.di import Provide
+
+        user_storage = _UserStorage()
+
+        @get("/objects", sync_to_thread=False)
+        def list_objects(backend: _UserStorage) -> dict[str, bool]:
+            return {"is_user_storage": backend is user_storage}
+
+        app = Litestar(
+            route_handlers=[list_objects],
+            dependencies={"backend": Provide(lambda: user_storage, sync_to_thread=False)},
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/objects")
+
+        assert response.status_code == 200
+        assert response.json() == {"is_user_storage": True}
+
+    @pytest.mark.integration
+    async def test_management_controller_still_uses_its_own_backend_despite_collision(
+        self, backend: MemoryBackend
+    ) -> None:
+        """The auto-registered management controller must keep using the
+        plugin's own APIKeyBackend for its own routes, even when the app
+        also defines an unrelated app-level "backend" dependency of a
+        different type."""
+        from litestar.di import Provide
+
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-collision",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[],
+            dependencies={"backend": Provide(lambda: _UserStorage(), sync_to_thread=False)},
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api-keys/",
+                headers={"X-API-Key": raw_admin_key},
+                json={"name": "new-key", "scopes": ["read:users"]},
+            )
+
+        assert response.status_code == 201

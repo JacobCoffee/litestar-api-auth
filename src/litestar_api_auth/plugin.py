@@ -193,15 +193,18 @@ class APIAuthPlugin(InitPluginProtocol):
 
         Every instance writes to the same global slots regardless of which
         backend it wraps: ``request.state["api_key"]`` (see
-        ``APIKeyMiddleware``), the ``self._backend_dependency_key`` dependency,
-        and the ``"backend"`` dependency used by auto-registered management
-        routes. A second instance wouldn't add a second, independent realm --
-        it would silently overwrite those slots with its own backend, so a
-        key minted by realm A can satisfy guards meant for realm B, and
-        realm A's management controller ends up wired to realm B's backend.
-        Multi-realm auth therefore isn't supported by stacking plugin
-        instances; raise instead of allowing that cross-wiring to happen
-        quietly.
+        ``APIKeyMiddleware``) and the ``self._backend_dependency_key``
+        dependency. A second instance wouldn't add a second, independent
+        realm -- it would silently overwrite those slots with its own
+        backend, so a key minted by realm A can satisfy guards meant for
+        realm B. (The auto-registered management controller's own
+        ``"backend"`` dependency is scoped to that controller rather than
+        registered app-wide, so a second instance would instead fail loudly
+        with a duplicate-route error if ``auto_routes`` and ``route_prefix``
+        also collide -- but the request-state and dependency-key collisions
+        above are silent, which is why this check exists.) Multi-realm auth
+        therefore isn't supported by stacking plugin instances; raise
+        instead of allowing that cross-wiring to happen quietly.
 
         Detection uses a fixed marker in ``app_config.opt`` rather than
         anything keyed off ``self`` (e.g. ``self._backend_dependency_key``,
