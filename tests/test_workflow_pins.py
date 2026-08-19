@@ -34,6 +34,72 @@ def _uses_refs(workflow_text: str) -> list[str]:
     return [match.group(1) for line in workflow_text.splitlines() if (match := _USES_RE.match(line))]
 
 
+_CHECKOUT_USES_RE = re.compile(r"^\s*uses:\s*actions/checkout@")
+
+
+def _indent(line: str) -> int:
+    """Return a line's leading-whitespace width."""
+    return len(line) - len(line.lstrip(" "))
+
+
+def _with_block(lines: list[str], uses_index: int) -> list[str] | None:
+    """Return the ``with:`` block's child lines for the step at ``uses_index``, or ``None``.
+
+    ``with:`` is a sibling key of ``uses:`` within the same step mapping, so it
+    shares the step's indentation; its own children are indented one level
+    further and run until the next line at or below that indentation.
+    """
+    uses_indent = _indent(lines[uses_index])
+    index = uses_index + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines) or _indent(lines[index]) != uses_indent or lines[index].strip() != "with:":
+        return None
+
+    with_indent = uses_indent
+    block: list[str] = []
+    index += 1
+    while index < len(lines):
+        line = lines[index]
+        if line.strip() and _indent(line) <= with_indent:
+            break
+        block.append(line)
+        index += 1
+    return block
+
+
+class TestCheckoutStepsDisablePersistCredentials:
+    """Every ``actions/checkout`` step, in every workflow, must set ``persist-credentials: false``.
+
+    Before this fix, ``publish.yml``'s checkout step had no ``with:`` block at
+    all, so it kept ``actions/checkout``'s default of
+    ``persist-credentials: true`` -- the release job's ``GITHUB_TOKEN`` git
+    credential was left on disk in ``.git/config`` for every later step
+    (``uv build``, the PyPI publish action) to read, unlike every other
+    workflow in the repo, which already disables it. This assertion would
+    have failed against that version of the file.
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("workflow_path", WORKFLOW_FILES, ids=lambda p: p.name)
+    def test_checkout_steps_set_persist_credentials_false(self, workflow_path: Path) -> None:
+        lines = workflow_path.read_text().splitlines()
+        checkout_indices = [i for i, line in enumerate(lines) if _CHECKOUT_USES_RE.match(line)]
+        if not checkout_indices:
+            pytest.skip(f"{workflow_path.name} has no actions/checkout step")
+
+        for index in checkout_indices:
+            block = _with_block(lines, index)
+            assert block is not None, (
+                f"{workflow_path.name}: actions/checkout step at line {index + 1} has no "
+                "'with:' block, so it keeps the default persist-credentials: true"
+            )
+            assert any(line.strip() == "persist-credentials: false" for line in block), (
+                f"{workflow_path.name}: actions/checkout step at line {index + 1} does not "
+                "set persist-credentials: false"
+            )
+
+
 class TestWorkflowActionsArePinned:
     """Every ``uses:`` step, in every workflow, must be pinned to a full commit SHA.
 
