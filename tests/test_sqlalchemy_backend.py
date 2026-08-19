@@ -685,6 +685,133 @@ class TestSQLAlchemyBackendUpdateLastUsed:
         assert second_time >= first_time
 
 
+class TestSQLAlchemyBackendCustomTableIsolation:
+    """Tests that a custom ``table_name`` backend only ever touches its own table.
+
+    Regression tests for ``_make_service`` reassigning ``svc.repository.model_type``
+    *after* the repository's ``__init__`` had already built ``self.statement``
+    from the default ``APIKeyModel`` (i.e. the ``api_keys`` table). That left the
+    query statement pinned to the wrong table while filter expressions used the
+    custom table's columns, so SQLAlchemy silently produced a cartesian-product
+    FROM clause (``FROM api_keys, custom_keys WHERE custom_keys.key_hash = ...``)
+    instead of an error.
+    """
+
+    async def test_custom_table_get_does_not_return_default_table_row(self) -> None:
+        """Test that querying a custom-table backend never returns a default-table row.
+
+        Reproduces the reported privilege-escalation scenario: an admin key lives
+        in the default ``api_keys`` table and a low-privilege key lives in a
+        ``custom_keys`` table (same engine/connection). Looking up the
+        low-privilege key's hash through the custom-table backend must return
+        the low-privilege key -- not the admin row from the other table.
+        """
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            echo=False,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+
+        default_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="api_keys"))
+        custom_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="custom_keys"))
+        await default_backend.startup()
+        await custom_backend.startup()
+
+        _, admin_hash = generate_api_key("admin_")
+        await default_backend.create(
+            admin_hash,
+            APIKeyInfo(key_id="admin", key_hash=admin_hash, name="Admin Key", scopes=["admin"]),
+        )
+
+        _, low_priv_hash = generate_api_key("low_")
+        await custom_backend.create(
+            low_priv_hash,
+            APIKeyInfo(key_id="low-priv", key_hash=low_priv_hash, name="Low Priv Key", scopes=["read"]),
+        )
+
+        result = await custom_backend.get(low_priv_hash)
+
+        assert result is not None
+        assert result.key_id == "low-priv"
+        assert result.scopes == ["read"]
+
+        await default_backend.close()
+
+    async def test_custom_table_get_returns_none_for_default_table_only_hash(self) -> None:
+        """Test that a hash which only exists in the default table is not visible via the custom-table backend.
+
+        The buggy statement queried ``FROM api_keys`` regardless of the
+        configured table, so this hash would have been (incorrectly) found.
+        """
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            echo=False,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+
+        default_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="api_keys"))
+        custom_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="custom_keys"))
+        await default_backend.startup()
+        await custom_backend.startup()
+
+        _, admin_hash = generate_api_key("admin_")
+        await default_backend.create(
+            admin_hash,
+            APIKeyInfo(key_id="admin", key_hash=admin_hash, name="Admin Key", scopes=["admin"]),
+        )
+
+        result = await custom_backend.get(admin_hash)
+
+        assert result is None
+
+        await default_backend.close()
+
+    async def test_custom_table_revoke_does_not_affect_default_table_row(self) -> None:
+        """Test that revoking a key via a custom-table backend never deactivates a default-table row.
+
+        Regression test for the reported "revoke on custom-table key deactivates
+        an unrelated default-table key" failure mode.
+        """
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            echo=False,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+
+        default_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="api_keys"))
+        custom_backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, table_name="custom_keys"))
+        await default_backend.startup()
+        await custom_backend.startup()
+
+        _, admin_hash = generate_api_key("admin_")
+        await default_backend.create(
+            admin_hash,
+            APIKeyInfo(key_id="admin", key_hash=admin_hash, name="Admin Key", scopes=["admin"], is_active=True),
+        )
+
+        _, low_priv_hash = generate_api_key("low_")
+        await custom_backend.create(
+            low_priv_hash,
+            APIKeyInfo(key_id="low-priv", key_hash=low_priv_hash, name="Low Priv Key", scopes=["read"]),
+        )
+
+        revoked = await custom_backend.revoke(low_priv_hash)
+        assert revoked is True
+
+        admin_after = await default_backend.get(admin_hash)
+        assert admin_after is not None
+        assert admin_after.is_active is True
+
+        low_priv_after = await custom_backend.get(low_priv_hash)
+        assert low_priv_after is not None
+        assert low_priv_after.is_active is False
+
+        await default_backend.close()
+
+
 class TestSQLAlchemyBackendClose:
     """Tests for closing the backend."""
 

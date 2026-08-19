@@ -19,7 +19,7 @@ from advanced_alchemy.base import BigIntBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types import DateTimeUTC, JsonB
-from sqlalchemy import String
+from sqlalchemy import String, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from litestar_api_auth.backends.base import APIKeyInfo
@@ -237,6 +237,11 @@ class SQLAlchemyBackend:
         """
         svc = APIKeyService(session=session)
         svc.repository.model_type = self._model
+        # The repository's __init__ already built `self.statement` from the
+        # class-level `model_type` (APIKeyModel) before the reassignment
+        # above took effect, so it must be rebuilt against the configured
+        # model or queries silently target the wrong table.
+        svc.repository.statement = select(self._model)
         return svc
 
     async def startup(self) -> None:
