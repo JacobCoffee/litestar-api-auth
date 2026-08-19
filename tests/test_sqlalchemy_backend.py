@@ -12,31 +12,71 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from litestar_api_auth.backends.base import APIKeyInfo
-from litestar_api_auth.backends.sqlalchemy import APIKeyService, SQLAlchemyBackend, SQLAlchemyConfig
+from litestar_api_auth.backends.sqlalchemy import APIKeyModel, APIKeyService, SQLAlchemyBackend, SQLAlchemyConfig
 from litestar_api_auth.service import generate_api_key
 
 
-def _patch_get_one_or_none_to_delete_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make ``APIKeyService.get_one_or_none`` delete the row it just found.
+def _patch_second_execute_to_reuse_id(
+    monkeypatch: pytest.MonkeyPatch,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    old_hash: str,
+    replacement_id: int,
+    replacement_key_id: str,
+    replacement_hash: str,
+) -> list[int]:
+    """Simulate an ABA race: a key is deleted and a *different* key reuses its row id.
 
-    Simulates the TOCTOU window in ``SQLAlchemyBackend.update()``/``delete()``:
-    another admin deletes the row after it is read but before the
-    read-based write (``svc.update()``/``svc.delete()`` by ``model.id``) runs.
+    A ``get(key_hash)``-then-act-by-``id`` implementation issues its read as one
+    database round trip and its write as a second, later round trip. This patches
+    ``AsyncSession.execute`` so that, right after the *first* round trip made by the
+    method under test returns (the read that would capture ``model.id``), the row is
+    deleted and replaced by an unrelated key that reuses the exact same primary key --
+    exactly the SQLite rowid-reuse scenario the finding describes. The *second* round
+    trip (the write) then proceeds against whatever the table looks like at that point.
+
+    A single-statement ``UPDATE/DELETE ... WHERE key_hash = :hash`` implementation only
+    ever issues one round trip, so this hook never fires for it -- which is itself the
+    proof that the get-then-act-by-id pattern is gone.
+
+    Returns:
+        A one-element list holding the running count of ``AsyncSession.execute``
+        calls, updated in place so the caller can assert on it after the fact.
     """
-    original_get_one_or_none = APIKeyService.get_one_or_none
+    original_execute = AsyncSession.execute
+    calls = [0]
+    fired = [False]
 
-    async def get_one_or_none_then_delete_row(self: APIKeyService, *args: object, **kwargs: object):
-        model = await original_get_one_or_none(self, *args, **kwargs)
-        if model is not None:
-            await self.repository.session.delete(model)
-            await self.repository.session.commit()
-        return model
+    async def patched_execute(self: AsyncSession, *args: object, **kwargs: object):
+        calls[0] += 1
+        # Fire exactly once, on the second round trip -- never again afterwards, so
+        # a later verification query in the test (itself a round trip) can't
+        # accidentally retrigger the race.
+        if calls[0] == 2 and not fired[0]:
+            fired[0] = True
+            async with sessionmaker() as raw_session:
+                await raw_session.execute(sa_delete(APIKeyModel).where(APIKeyModel.key_hash == old_hash))
+                raw_session.add(
+                    APIKeyModel(
+                        id=replacement_id,
+                        key_id=replacement_key_id,
+                        key_hash=replacement_hash,
+                        name="Reused-ID Key",
+                        scopes=["read"],
+                        is_active=True,
+                    )
+                )
+                await raw_session.commit()
+        return await original_execute(self, *args, **kwargs)
 
-    monkeypatch.setattr(APIKeyService, "get_one_or_none", get_one_or_none_then_delete_row)
+    monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+    return calls
 
 
 @pytest.fixture
@@ -401,32 +441,64 @@ class TestSQLAlchemyBackendUpdate:
         assert result is not None
         assert result.is_active is False
 
-    async def test_update_row_deleted_between_read_and_write_returns_none(
+    async def test_update_aba_race_cannot_mutate_reused_id_row(
         self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that a row deleted between the read and the write is treated as not-found.
+        """Test that update() can no longer be tricked into mutating a reused-id row.
 
-        Regression test for the update()/delete() get-then-act TOCTOU: if the row
-        disappears after ``get_one_or_none()`` but before ``svc.update()`` runs by
-        ``model.id``, Advanced Alchemy's ``NotFoundError`` must be swallowed and
-        ``None`` returned, matching the documented contract, instead of propagating
-        as an uncaught exception.
+        Regression test for the reported ABA race: a ``get(key_hash)``-then-write-by-
+        ``model.id`` implementation reads the row matching ``key_hash`` in one round
+        trip and writes by that row's primary key in a later, separate round trip. If
+        the row is deleted and a different key is created that reuses the exact same
+        primary key in between (SQLite reuses rowids without ``AUTOINCREMENT``), the
+        later write silently lands on the unrelated replacement key instead of the
+        intended one. The fix collapses the read and the write into a single
+        ``UPDATE ... WHERE key_hash = :hash`` round trip, so the race window this test
+        injects before the *second* database round trip never gets a chance to run.
         """
-        _, hashed_key = generate_api_key("test_")
+        _, hash_a = generate_api_key("key-a-")
+        _, hash_b = generate_api_key("key-b-")
 
-        key_info = APIKeyInfo(
-            key_id="race-update",
-            key_hash=hashed_key,
-            name="Race Key",
-            scopes=["read"],
+        await sa_backend.create(
+            hash_a,
+            APIKeyInfo(key_id="key-a", key_hash=hash_a, name="Key A", scopes=["read"], is_active=True),
         )
-        await sa_backend.create(hashed_key, key_info)
 
-        _patch_get_one_or_none_to_delete_row(monkeypatch)
+        sessionmaker = sa_backend._sessionmaker
+        assert sessionmaker is not None
+        async with sessionmaker() as session:
+            key_a_id = (
+                await session.execute(select(APIKeyModel.id).where(APIKeyModel.key_hash == hash_a))
+            ).scalar_one()
 
-        result = await sa_backend.update(hashed_key, name="Updated Name")
+        calls = _patch_second_execute_to_reuse_id(
+            monkeypatch,
+            sessionmaker,
+            old_hash=hash_a,
+            replacement_id=key_a_id,
+            replacement_key_id="key-b",
+            replacement_hash=hash_b,
+        )
 
-        assert result is None
+        result = await sa_backend.update(hash_a, name="Attacker-Controlled Name", is_active=False)
+        # Undo the patch immediately so the verification queries below run against
+        # the real `AsyncSession.execute` and can't be mistaken for a second round
+        # trip belonging to the operation under test.
+        monkeypatch.undo()
+
+        # A single `UPDATE ... WHERE key_hash = :hash` is exactly one round trip; a
+        # get-then-write-by-id implementation needs (at least) two, which is exactly
+        # the window the injected race above needs to run.
+        assert calls[0] == 1
+
+        # Key B only ever gets created by the race helper reusing key A's freed row
+        # id -- and that only happens if the code under test hands it a second round
+        # trip to run in. Since that never happens here, key B must never exist, and
+        # key A's own update must have gone through untouched.
+        assert await sa_backend.get(hash_b) is None
+        assert result is not None
+        assert result.name == "Attacker-Controlled Name"
+        assert result.is_active is False
 
 
 class TestSQLAlchemyBackendDelete:
@@ -473,32 +545,59 @@ class TestSQLAlchemyBackendDelete:
         result = await sa_backend.get_by_id("test-123")
         assert result is None
 
-    async def test_delete_row_deleted_between_read_and_write_returns_false(
+    async def test_delete_aba_race_cannot_delete_reused_id_row(
         self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that a row deleted between the read and the write is treated as not-found.
+        """Test that delete() can no longer be tricked into deleting a reused-id row.
 
-        Regression test for the update()/delete() get-then-act TOCTOU: if the row
-        disappears after ``get_one_or_none()`` but before ``svc.delete()`` runs by
-        ``model.id``, Advanced Alchemy's ``NotFoundError`` must be swallowed and
-        ``False`` returned, matching the documented contract, instead of propagating
-        as an uncaught exception.
+        Regression test for the reported ABA race (see
+        ``test_update_aba_race_cannot_mutate_reused_id_row`` for the full mechanism).
+        For delete(), the finding warns this can destroy an unrelated, live key. The
+        fix collapses the read and the write into a single
+        ``DELETE ... WHERE key_hash = :hash`` round trip, so the race window this test
+        injects before the *second* database round trip never gets a chance to run.
         """
-        _, hashed_key = generate_api_key("test_")
+        _, hash_a = generate_api_key("key-a-")
+        _, hash_b = generate_api_key("key-b-")
 
-        key_info = APIKeyInfo(
-            key_id="race-delete",
-            key_hash=hashed_key,
-            name="Race Key",
-            scopes=["read"],
+        await sa_backend.create(
+            hash_a,
+            APIKeyInfo(key_id="key-a", key_hash=hash_a, name="Key A", scopes=["read"], is_active=True),
         )
-        await sa_backend.create(hashed_key, key_info)
 
-        _patch_get_one_or_none_to_delete_row(monkeypatch)
+        sessionmaker = sa_backend._sessionmaker
+        assert sessionmaker is not None
+        async with sessionmaker() as session:
+            key_a_id = (
+                await session.execute(select(APIKeyModel.id).where(APIKeyModel.key_hash == hash_a))
+            ).scalar_one()
 
-        result = await sa_backend.delete(hashed_key)
+        calls = _patch_second_execute_to_reuse_id(
+            monkeypatch,
+            sessionmaker,
+            old_hash=hash_a,
+            replacement_id=key_a_id,
+            replacement_key_id="key-b",
+            replacement_hash=hash_b,
+        )
 
-        assert result is False
+        result = await sa_backend.delete(hash_a)
+        # Undo the patch immediately so the verification query below runs against
+        # the real `AsyncSession.execute` and can't be mistaken for a second round
+        # trip belonging to the operation under test.
+        monkeypatch.undo()
+
+        # A single `DELETE ... WHERE key_hash = :hash` is exactly one round trip; a
+        # get-then-delete-by-id implementation needs (at least) two, which is exactly
+        # the window the injected race above needs to run.
+        assert calls[0] == 1
+
+        # Key B only ever gets created by the race helper reusing key A's freed row
+        # id -- and that only happens if the code under test hands it a second round
+        # trip to run in. Since that never happens here, key B must never exist, and
+        # key A itself must have been deleted cleanly.
+        assert result is True
+        assert await sa_backend.get(hash_b) is None
 
 
 class TestSQLAlchemyBackendList:

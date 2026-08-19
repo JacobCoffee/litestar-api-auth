@@ -364,29 +364,38 @@ class SQLAlchemyBackend:
         if self._sessionmaker is None:
             return None
 
-        from advanced_alchemy.exceptions import NotFoundError
+        from sqlalchemy import update as sa_update
+
+        # Map the "metadata" kwarg to the model's "metadata_" column
+        update_data: dict[str, Any] = {}
+        for field, value in updates.items():
+            if field == "metadata":
+                update_data["metadata_"] = value
+            else:
+                update_data[field] = value
+
+        if not update_data:
+            return await self.get(key_hash)
 
         async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+            # A single UPDATE ... WHERE key_hash = :key_hash (with RETURNING) keeps
+            # the match and the write on the same predicate. A get-then-act-by-id
+            # split here would be vulnerable to an ABA race: another key's row could
+            # be deleted and replaced by a row that reuses the same primary key
+            # (SQLite reuses rowids without AUTOINCREMENT) between the read and the
+            # write, silently mutating the replacement key instead of this one.
+            stmt = (
+                sa_update(self._model)
+                .where(self._model.key_hash == key_hash)
+                .values(**update_data)
+                .returning(self._model)
+            )
+            result = await session.execute(stmt)
+            model = result.scalar_one_or_none()
             if model is None:
                 return None
-
-            # Map the "metadata" kwarg to the model's "metadata_" column
-            update_data: dict[str, Any] = {}
-            for field, value in updates.items():
-                if field == "metadata":
-                    update_data["metadata_"] = value
-                else:
-                    update_data[field] = value
-
-            update_data["id"] = model.id
-            try:
-                result = await svc.update(update_data, item_id=model.id, auto_commit=True)
-            except NotFoundError:
-                # Row was deleted between the read above and this write.
-                return None
-            return _model_to_info(result)
+            await session.commit()
+            return _model_to_info(model)
 
     async def delete(self, key_hash: str) -> bool:
         """Delete an API key from the database.
@@ -400,19 +409,17 @@ class SQLAlchemyBackend:
         if self._sessionmaker is None:
             return False
 
-        from advanced_alchemy.exceptions import NotFoundError
+        from sqlalchemy import delete as sa_delete
 
         async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
-            if model is None:
-                return False
-            try:
-                await svc.delete(model.id, auto_commit=True)
-            except NotFoundError:
-                # Row was deleted between the read above and this write.
-                return False
-            return True
+            # A single DELETE ... WHERE key_hash = :key_hash (with RETURNING) keeps
+            # the match and the write on the same predicate -- see the comment in
+            # update() for why a get-then-act-by-id split is unsafe here.
+            stmt = sa_delete(self._model).where(self._model.key_hash == key_hash).returning(self._model.id)
+            result = await session.execute(stmt)
+            deleted = result.scalar_one_or_none() is not None
+            await session.commit()
+            return deleted
 
     async def list(
         self,
