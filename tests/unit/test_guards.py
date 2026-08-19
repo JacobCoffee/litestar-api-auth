@@ -19,7 +19,7 @@ from litestar.exceptions import NotAuthorizedException, PermissionDeniedExceptio
 
 from litestar_api_auth import guards
 from litestar_api_auth.backends.base import APIKeyInfo as BackendAPIKeyInfo
-from litestar_api_auth.guards import get_api_key_info, require_api_key, require_scope
+from litestar_api_auth.guards import get_api_key_info, require_api_key, require_scope, require_scopes
 from litestar_api_auth.types import APIKeyInfo as PublicAPIKeyInfo
 
 
@@ -156,3 +156,61 @@ class TestStateTrustBoundary:
 
         with pytest.raises(PermissionDeniedException):
             require_scope("billing")(connection, None)  # type: ignore[arg-type]
+
+
+class TestScopeDisclosure:
+    """Regression tests: 403 responses must not echo the key's granted
+    scopes back to the caller.
+
+    Before this fix, ``require_scope``/``require_scopes`` included
+    ``key_info.scopes`` -- the full list of scopes actually granted to the
+    presented key -- in the ``PermissionDeniedException`` detail. A caller
+    holding a stolen or shared low-privilege key could probe a guarded route
+    and have the 403 body enumerate exactly what that key is allowed to do,
+    with no management-scope access required. The *required* scopes (which
+    are baked into the route's guard configuration and are not secret) may
+    still be reported.
+    """
+
+    def _key_with_scopes(self, *scopes: str) -> BackendAPIKeyInfo:
+        return BackendAPIKeyInfo(
+            key_id="low-priv",
+            key_hash="",
+            name="Low Privilege Key",
+            scopes=list(scopes),
+            is_active=True,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+
+    def test_require_scope_403_does_not_echo_available_scopes(self) -> None:
+        key_info = self._key_with_scopes("read:public", "billing:secret-project")
+        connection = _connection_with_state_api_key(key_info)
+
+        with pytest.raises(PermissionDeniedException) as exc_info:
+            require_scope("admin:write")(connection, None)  # type: ignore[arg-type]
+
+        detail = str(exc_info.value.detail)
+        assert "read:public" not in detail
+        assert "billing:secret-project" not in detail
+
+    def test_require_scopes_all_403_does_not_echo_available_scopes(self) -> None:
+        key_info = self._key_with_scopes("read:public", "billing:secret-project")
+        connection = _connection_with_state_api_key(key_info)
+
+        with pytest.raises(PermissionDeniedException) as exc_info:
+            require_scopes("admin:read", "users:write")(connection, None)  # type: ignore[arg-type]
+
+        detail = str(exc_info.value.detail)
+        assert "read:public" not in detail
+        assert "billing:secret-project" not in detail
+
+    def test_require_scopes_any_403_does_not_echo_available_scopes(self) -> None:
+        key_info = self._key_with_scopes("read:public", "billing:secret-project")
+        connection = _connection_with_state_api_key(key_info)
+
+        with pytest.raises(PermissionDeniedException) as exc_info:
+            require_scopes("admin:read", "admin:write", match="any")(connection, None)  # type: ignore[arg-type]
+
+        detail = str(exc_info.value.detail)
+        assert "read:public" not in detail
+        assert "billing:secret-project" not in detail

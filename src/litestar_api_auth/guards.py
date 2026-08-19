@@ -142,9 +142,7 @@ def require_scope(scope: str) -> Guard:
         key_info = get_api_key_info(connection)
 
         if not key_info.has_scope(scope):
-            raise PermissionDeniedException(
-                detail=f"API key lacks required scope: {scope}. Available scopes: {key_info.scopes}"
-            )
+            raise PermissionDeniedException(detail=f"API key lacks required scope: {scope}")
 
     return guard
 
@@ -203,12 +201,9 @@ def require_scopes(*scopes: str, match: ScopeRequirement = "all") -> Guard:
 
         if not key_info.has_scopes(scopes_list, requirement=match):
             if match == "all":
-                detail = f"API key lacks required scopes. Required: {scopes_list}, Available: {key_info.scopes}"
+                detail = f"API key lacks required scopes. Required: {scopes_list}"
             else:
-                detail = (
-                    f"API key lacks at least one required scope. "
-                    f"Required (any): {scopes_list}, Available: {key_info.scopes}"
-                )
+                detail = f"API key lacks at least one required scope. Required (any): {scopes_list}"
 
             raise PermissionDeniedException(detail=detail)
 
