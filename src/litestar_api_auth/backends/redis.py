@@ -362,6 +362,21 @@ class RedisBackend:
 
                 info = self._deserialize_info(data if isinstance(data, str) else data.decode())
 
+                # last_used_at must never move backward. update_last_used()
+                # captures datetime.now() before calling update(), so a call
+                # that loses the WATCH race and retries here re-reads a
+                # record that a concurrent, later-timestamped call may have
+                # already written. Without this guard, the retried (stale)
+                # timestamp would clobber the newer one on the retry's write.
+                new_last_used_at = updates.get("last_used_at", info.last_used_at)
+                if (
+                    "last_used_at" in updates
+                    and info.last_used_at is not None
+                    and new_last_used_at is not None
+                    and new_last_used_at < info.last_used_at
+                ):
+                    new_last_used_at = info.last_used_at
+
                 # Create updated info with new values, mirroring the memory backend pattern
                 updated_info = APIKeyInfo(
                     key_id=info.key_id,
@@ -371,7 +386,7 @@ class RedisBackend:
                     is_active=updates.get("is_active", info.is_active),
                     created_at=info.created_at,
                     expires_at=updates.get("expires_at", info.expires_at),
-                    last_used_at=updates.get("last_used_at", info.last_used_at),
+                    last_used_at=new_last_used_at,
                     metadata=updates.get("metadata", info.metadata),
                 )
                 serialized = self._serialize_info(updated_info)

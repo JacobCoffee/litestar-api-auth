@@ -906,6 +906,37 @@ class TestRedisBackendUpdateLastUsed:
         assert second_time is not None
         assert second_time >= first_time
 
+    async def test_update_last_used_does_not_move_backward(self, redis_backend: RedisBackend) -> None:
+        """A stale write must not roll last_used_at backward.
+
+        Regression test for a race where update_last_used() captures
+        datetime.now() before entering update()'s WATCH retry loop: a call
+        that loses the WATCH race retries against a record a concurrent,
+        later-timestamped call already wrote, and must not clobber that
+        newer value with its own older one.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        newer = datetime.now(timezone.utc)
+        older = newer - timedelta(seconds=5)
+
+        # Simulate the newer timestamp winning the WATCH race and landing first.
+        await redis_backend.update(hashed_key, last_used_at=newer)
+        # Simulate the race loser's retried write, carrying its stale, older timestamp.
+        await redis_backend.update(hashed_key, last_used_at=older)
+
+        retrieved = await redis_backend.get(hashed_key)
+        assert retrieved is not None
+        assert retrieved.last_used_at == newer
+
 
 class TestRedisBackendClose:
     """Tests for closing the backend."""
