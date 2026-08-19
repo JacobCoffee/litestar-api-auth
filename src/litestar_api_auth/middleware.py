@@ -7,7 +7,6 @@ request state for use by guards.
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING, Protocol
 
 import msgspec

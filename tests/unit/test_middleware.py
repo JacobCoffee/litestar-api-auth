@@ -12,6 +12,7 @@ from typing import Any
 
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend
+from litestar_api_auth.exceptions import APIKeyExpiredError, APIKeyRevokedError
 from litestar_api_auth.middleware import APIKeyMiddleware
 from litestar_api_auth.service import generate_api_key
 
@@ -165,6 +166,71 @@ class TestStaleStateIsCleared:
 
         assert scope["state"]["api_key"] is not None
         assert scope["state"]["api_key"].key_id == "good"
+
+
+class _RevokedDuringUpdateBackend(MemoryBackend):
+    """A race-aware backend that detects concurrent revocation inside update_last_used().
+
+    Simulates a backend where get() still reports an active key (as checked
+    moments earlier by _validate_api_key), but a concurrent revocation is
+    detected only when the usage-tracking write actually runs.
+    """
+
+    async def update_last_used(self, key_hash: str) -> None:
+        raise APIKeyRevokedError(key_id="raced-out")
+
+
+class _ExpiredDuringUpdateBackend(MemoryBackend):
+    """A race-aware backend that detects concurrent expiry inside update_last_used()."""
+
+    async def update_last_used(self, key_hash: str) -> None:
+        raise APIKeyExpiredError(key_id="raced-out")
+
+
+class TestUpdateLastUsedRevocationRaceIsNotSwallowed:
+    """Regression tests for the revocation-race finding.
+
+    Before the fix, ``update_last_used()`` ran inside the same try block that
+    caught ``APIKeyRevokedError``/``APIKeyExpiredError`` from validation, and
+    by the time it ran, ``state["api_key"]`` had already been populated. A
+    race-aware custom backend raising either exception from
+    ``update_last_used()`` (e.g. after detecting a concurrent revocation) was
+    silently swallowed, and the just-revoked/expired key's request reached
+    guarded handlers still authenticated.
+    """
+
+    async def test_revocation_detected_during_update_clears_state(self) -> None:
+        """APIKeyRevokedError from update_last_used() must clear state["api_key"]."""
+        backend = _RevokedDuringUpdateBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        # Must not raise -- and must not leave the request authenticated.
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_expiry_detected_during_update_clears_state(self) -> None:
+        """APIKeyExpiredError from update_last_used() must clear state["api_key"]."""
+        backend = _ExpiredDuringUpdateBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
 
 
 class TestApiKeyHashIsRedactedFromState:
