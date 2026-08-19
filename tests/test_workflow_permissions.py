@@ -28,7 +28,27 @@ from pathlib import Path
 import pytest
 
 WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
-WORKFLOW_FILES = sorted(WORKFLOWS_DIR.glob("*.yml"))
+WORKFLOW_FILES = sorted({*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")})
+
+# Every permission scope GitHub Actions recognizes, per
+# https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#permissions
+# -- needed to expand the `read-all` / `write-all` shorthand forms.
+_ALL_SCOPES = (
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+)
 
 # Permission scopes that let a job act outside the checked-out repo (mint an
 # OIDC token, publish to GitHub Pages). A job that runs arbitrary third-party
@@ -42,17 +62,22 @@ _DEPLOY_SCOPES = ("id-token", "pages")
 _INSTALL_RE = re.compile(r"\buv (sync|build)\b|\bpip install\b|\bnpm (install|ci)\b|\bpoetry install\b")
 
 _JOB_HEADER_RE = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*$", re.MULTILINE)
-_TOP_PERMISSIONS_RE = re.compile(r"^permissions:[ \t]*$", re.MULTILINE)
-_JOB_PERMISSIONS_RE = re.compile(r"^ {4}permissions:[ \t]*$", re.MULTILINE)
+
+# A `permissions:` header, optionally followed on the *same* line by one of the
+# scalar/shorthand forms GitHub also accepts (`{}`, `read-all`, `write-all`).
+# Block-form entries (the common case in this repo) live on subsequent lines.
+_TOP_PERMISSIONS_RE = re.compile(r"^permissions:[ \t]*(\{\}|read-all|write-all)?[ \t]*(?:#.*)?$", re.MULTILINE)
+_JOB_PERMISSIONS_RE = re.compile(r"^ {4}permissions:[ \t]*(\{\}|read-all|write-all)?[ \t]*(?:#.*)?$", re.MULTILINE)
 
 
 def _permission_entries(block: str, start: int, indent: int) -> dict[str, str]:
     """Collect ``key: value`` permission entries indented under a ``permissions:`` header.
 
     ``start`` is the offset of the end of the ``permissions:`` line; entries are
-    read until a line with indentation less than or equal to ``indent`` appears.
+    read (trailing ``# comment``s ignored) until a line with indentation less
+    than or equal to ``indent`` appears.
     """
-    entry_re = re.compile(rf"^ {{{indent}}}([a-z-]+):\s*(read|write|none)[ \t]*$")
+    entry_re = re.compile(rf"^ {{{indent}}}([a-z-]+):\s*(read|write|none)\s*(?:#.*)?$")
     entries: dict[str, str] = {}
     for line in block[start:].splitlines():
         if not line.strip():
@@ -64,14 +89,35 @@ def _permission_entries(block: str, start: int, indent: int) -> dict[str, str]:
     return entries
 
 
+def _permissions_at(text: str, header_re: re.Pattern[str], entry_indent: int) -> tuple[bool, dict[str, str]]:
+    """Return ``(declared, entries)`` for a ``permissions:`` key found in ``text``.
+
+    ``declared`` distinguishes "no ``permissions:`` key at all" (caller should
+    fall back to whatever it inherits) from an explicit ``permissions: {}``
+    (caller must treat that as "no permissions", full stop). Handles the
+    block form used throughout this repo as well as the ``read-all``/
+    ``write-all``/``{}`` shorthand GitHub also accepts.
+    """
+    match = header_re.search(text)
+    if not match:
+        return False, {}
+
+    shorthand = match.group(1)
+    if shorthand == "{}":
+        return True, {}
+    if shorthand == "read-all":
+        return True, dict.fromkeys(_ALL_SCOPES, "read")
+    if shorthand == "write-all":
+        return True, dict.fromkeys(_ALL_SCOPES, "write")
+    return True, _permission_entries(text, match.end(), indent=entry_indent)
+
+
 def _top_level_permissions(text: str) -> dict[str, str]:
-    """Return the workflow-level ``permissions:`` block, or ``{}`` if absent."""
+    """Return the workflow-level ``permissions:`` block, or ``{}`` if absent/empty."""
     jobs_index = text.find("\njobs:")
     header_scope = text if jobs_index == -1 else text[:jobs_index]
-    match = _TOP_PERMISSIONS_RE.search(header_scope)
-    if not match:
-        return {}
-    return _permission_entries(header_scope, match.end(), indent=2)
+    _, entries = _permissions_at(header_scope, _TOP_PERMISSIONS_RE, entry_indent=2)
+    return entries
 
 
 def _job_blocks(text: str) -> dict[str, str]:
@@ -90,10 +136,8 @@ def _job_blocks(text: str) -> dict[str, str]:
 
 def _job_permissions(block: str) -> dict[str, str]:
     """Return a job's own ``permissions:`` block, or ``{}`` if it declares none."""
-    match = _JOB_PERMISSIONS_RE.search(block)
-    if not match:
-        return {}
-    return _permission_entries(block, match.end(), indent=6)
+    _, entries = _permissions_at(block, _JOB_PERMISSIONS_RE, entry_indent=6)
+    return entries
 
 
 def _runs_third_party_install(block: str) -> bool:
@@ -102,9 +146,11 @@ def _runs_third_party_install(block: str) -> bool:
 
 
 def _effective_permissions(job_block: str, top_permissions: dict[str, str]) -> dict[str, str]:
-    """A job's own ``permissions:`` fully replaces the workflow default; absent, it inherits it."""
-    job_permissions = _job_permissions(job_block)
-    return job_permissions if job_permissions else top_permissions
+    """A job's own ``permissions:`` (even an explicit empty one) fully replaces the
+    workflow default; only a job with *no* ``permissions:`` key at all inherits it.
+    """
+    declared, job_permissions = _permissions_at(job_block, _JOB_PERMISSIONS_RE, entry_indent=6)
+    return job_permissions if declared else top_permissions
 
 
 class TestThirdPartyCodeJobsCannotDeploy:
@@ -163,8 +209,7 @@ class TestDocsWorkflowPermissionsAreJobScoped:
         assert build_permissions == {"contents": "read"}
 
     @pytest.mark.unit
-    def test_deploy_job_holds_the_pages_scopes(self) -> None:
+    def test_deploy_job_holds_exactly_the_pages_scopes(self) -> None:
         text = (WORKFLOWS_DIR / "docs.yml").read_text()
         deploy_permissions = _job_permissions(_job_blocks(text)["deploy"])
-        assert deploy_permissions.get("pages") == "write"
-        assert deploy_permissions.get("id-token") == "write"
+        assert deploy_permissions == {"pages": "write", "id-token": "write"}
