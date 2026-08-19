@@ -13,9 +13,17 @@ jobs:
   # so uv uses its own bundled copy of the backend instead of fetching the
   # `uv_build` package from PyPI at build time -- keep these two versions in
   # lockstep so that stays true.
+  # Restrict manual runs to tag refs: a bare `workflow_dispatch` trigger lets
+  # any collaborator with write access dispatch this workflow against an
+  # arbitrary branch or commit, publishing it to PyPI outside the normal
+  # release flow. Tags require a maintainer to push/create them (and should
+  # carry a tag protection ruleset), so gating on `ref_type == 'tag'` closes
+  # that arbitrary-ref gap; `release` events always fire with a tag ref too,
+  # so the normal release flow is unaffected.
   build:
     name: Build package
     runs-on: ubuntu-latest
+    if: github.event_name == 'release' || github.ref_type == 'tag'
     permissions:
       contents: read
     steps:
