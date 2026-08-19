@@ -63,7 +63,7 @@ jobs:
           enable-cache: true
 
       - name: Create virtual environment
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --locked
 
       - name: Run ruff check
         run: uv run ruff check
@@ -112,7 +112,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --locked
 
       - name: Run tests
         run: uv run pytest tests/ -v
@@ -156,7 +156,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --locked
 
       - name: Run tests with coverage
         run: uv run pytest tests/ -v --cov=litestar_api_auth --cov-report=term-missing --cov-report=xml

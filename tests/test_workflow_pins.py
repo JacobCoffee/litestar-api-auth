@@ -34,7 +34,7 @@ def _uses_refs(workflow_text: str) -> list[str]:
     return [match.group(1) for line in workflow_text.splitlines() if (match := _USES_RE.match(line))]
 
 
-_CHECKOUT_USES_RE = re.compile(r"^\s*uses:\s*actions/checkout@")
+_CHECKOUT_USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*actions/checkout@")
 
 
 def _indent(line: str) -> int:
@@ -42,28 +42,68 @@ def _indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
+def _key_indent(line: str) -> int:
+    """Return the column at which this line's own YAML key starts.
+
+    A step's first key is often written inline with its list bullet
+    (``- uses: ...``); that key's siblings (``with:``, ``id:``, ...) then
+    align with the text after the dash, not with the dash itself.
+    """
+    raw_indent = _indent(line)
+    if line[raw_indent:].startswith("- "):
+        return raw_indent + 2
+    return raw_indent
+
+
 def _with_block(lines: list[str], uses_index: int) -> list[str] | None:
-    """Return the ``with:`` block's child lines for the step at ``uses_index``, or ``None``.
+    """Return the ``with:`` block's direct child lines for the step at ``uses_index``, or ``None``.
 
     ``with:`` is a sibling key of ``uses:`` within the same step mapping, so it
-    shares the step's indentation; its own children are indented one level
-    further and run until the next line at or below that indentation.
+    shares ``uses:``'s key indentation. This scans forward over any other
+    sibling keys (e.g. ``id:``, comments) the step may have before finding it,
+    and stops as soon as indentation drops below that level -- which marks
+    either the end of the step's own mapping or the next ``- `` step in the
+    list.
+
+    Only lines indented exactly one level deeper than ``with:`` are collected,
+    not arbitrarily deeper ones -- so a nested block scalar (e.g. a
+    ``sparse-checkout: |`` value that happens to *contain* the text
+    ``persist-credentials: false``) can't be mistaken for the key itself.
     """
-    uses_indent = _indent(lines[uses_index])
+    key_indent = _key_indent(lines[uses_index])
     index = uses_index + 1
-    while index < len(lines) and not lines[index].strip():
-        index += 1
-    if index >= len(lines) or _indent(lines[index]) != uses_indent or lines[index].strip() != "with:":
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        line_indent = _indent(line)
+        if line_indent < key_indent:
+            return None  # dedented out of the step: no with: block
+        if line_indent == key_indent:
+            if line.strip() == "with:":
+                break
+            index += 1  # another sibling key of uses:, keep scanning
+            continue
+        index += 1  # a scalar continuation of a prior sibling's value
+    else:
         return None
 
-    with_indent = uses_indent
+    child_indent: int | None = None
     block: list[str] = []
     index += 1
     while index < len(lines):
         line = lines[index]
-        if line.strip() and _indent(line) <= with_indent:
+        if not line.strip():
+            index += 1
+            continue
+        line_indent = _indent(line)
+        if line_indent <= key_indent:
             break
-        block.append(line)
+        if child_indent is None:
+            child_indent = line_indent
+        if line_indent == child_indent:
+            block.append(line)
         index += 1
     return block
 
@@ -74,7 +114,7 @@ class TestCheckoutStepsDisablePersistCredentials:
     Before this fix, ``publish.yml``'s checkout step had no ``with:`` block at
     all, so it kept ``actions/checkout``'s default of
     ``persist-credentials: true`` -- the release job's ``GITHUB_TOKEN`` git
-    credential was left on disk in ``.git/config`` for every later step
+    credential was left persisted in the local git config for every later step
     (``uv build``, the PyPI publish action) to read, unlike every other
     workflow in the repo, which already disables it. This assertion would
     have failed against that version of the file.
