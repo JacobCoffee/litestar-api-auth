@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, SQLAlchemyError, StatementError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -185,7 +186,7 @@ class TestSQLAlchemyBackendCreate:
         )
         assert hashed_key not in rendered
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
 
     async def test_create_duplicate_hash_does_not_leak_hash(
         self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
@@ -223,7 +224,105 @@ class TestSQLAlchemyBackendCreate:
         assert "already exists" in str(exc_info.value)
         assert hashed_key not in str(exc_info.value)
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
+
+    async def test_create_does_not_leak_hash_on_generic_statement_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a non-constraint DB failure during the INSERT never exposes key_hash.
+
+        Regression test for a transient DB failure (dropped connection, lock
+        timeout, etc.) during ``backend.create()`` that is *not* a constraint
+        violation. SQLAlchemy's ``StatementError.__str__`` renders bound
+        parameters unless the engine is configured with ``hide_parameters=True``,
+        which this library's user-supplied engine never sets.
+
+        The failure is injected at ``AsyncSession.commit`` (below the
+        Advanced Alchemy service boundary) rather than by monkeypatching
+        ``APIKeyService.create`` itself, so this exercises the real
+        ``wrap_sqlalchemy_exception`` translation: Advanced Alchemy's
+        repository catches the raw ``OperationalError`` and re-raises it as
+        its own ``advanced_alchemy.exceptions.IntegrityError``, chained
+        (``from exc``) to the original. Before the fix, the ``except`` clause
+        here imported ``IntegrityError`` from ``sqlalchemy.exc`` -- a
+        different, unrelated class -- so this wrapped exception matched
+        nothing and propagated with the original ``OperationalError`` (and
+        its bound key_hash parameter) intact on ``__cause__``.
+
+        This must raise ``RuntimeError``, not ``ValueError``: Advanced
+        Alchemy wraps a transient ``OperationalError`` into the exact same
+        ``IntegrityError`` class it uses for genuine constraint violations,
+        so the backend has to inspect ``exc.__cause__``'s *type* (a real
+        ``sqlalchemy.exc.IntegrityError`` vs. anything else) to avoid
+        misreporting a dropped connection as "already exists".
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        async def fake_commit(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise OperationalError(
+                "INSERT INTO api_keys (key_hash) VALUES (?)",
+                (hashed_key,),
+                Exception("connection reset"),
+            )
+
+        monkeypatch.setattr(AsyncSession, "commit", fake_commit)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.create(hashed_key, key_info)
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    async def test_create_does_not_leak_hash_on_non_statement_repository_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a non-statement Advanced Alchemy failure during create() never exposes key_hash.
+
+        Regression test for the residual translation path in Advanced
+        Alchemy's ``wrap_sqlalchemy_exception``: a bare ``SQLAlchemyError``
+        (not a ``StatementError``/``IntegrityError``/``InvalidRequestError``)
+        is wrapped into a plain ``advanced_alchemy.exceptions.RepositoryError``
+        with the original exception's message interpolated directly into
+        ``RepositoryError.detail`` -- so if that message ever happened to
+        contain key_hash (e.g. a driver or middleware bug that echoes bound
+        values into a generic error), it would flow straight into the
+        ``ValueError``/``RuntimeError`` this backend raises unless that
+        exception class is also caught and sanitized.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        async def fake_commit(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise SQLAlchemyError(f"driver reported a fault for key_hash={hashed_key}")
+
+        monkeypatch.setattr(AsyncSession, "commit", fake_commit)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.create(hashed_key, key_info)
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
     async def test_create_duplicate_id(self, sa_backend: SQLAlchemyBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
@@ -374,6 +473,52 @@ class TestSQLAlchemyBackendGet:
         assert result.metadata == {"nested": {"deep": True}, "count": 42}
         assert result.scopes == ["admin:read", "admin:write"]
 
+    async def test_get_does_not_leak_hash_on_statement_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a mid-query DB failure during get() never exposes key_hash.
+
+        Regression test for a transient DB failure (dropped connection, lock
+        timeout, etc.) occurring during ``backend.get(key_hash)``. SQLAlchemy's
+        ``StatementError.__str__`` renders bound parameters unless the engine is
+        configured with ``hide_parameters=True``, which this library's
+        user-supplied engine never sets.
+
+        The failure is injected at ``AsyncSession.execute`` (below the
+        Advanced Alchemy service boundary) rather than by monkeypatching
+        ``APIKeyService.get_one_or_none`` itself, so this exercises the real
+        ``wrap_sqlalchemy_exception`` translation that ``get_one_or_none``
+        applies internally: it catches the raw ``OperationalError`` and
+        re-raises it as ``advanced_alchemy.exceptions.IntegrityError`` (a
+        SQLAlchemy ``StatementError`` is never actually what reaches this
+        call site), chained (``from exc``) to the original. Before the fix,
+        ``get()`` caught ``sqlalchemy.exc.StatementError``, which this
+        wrapped exception is not an instance of, so it matched nothing and
+        propagated with the original ``OperationalError`` (and its bound
+        key_hash parameter) intact on ``__cause__``.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        async def fake_execute(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise OperationalError(
+                "SELECT * FROM api_keys WHERE api_keys.key_hash = ?",
+                (hashed_key,),
+                Exception("connection reset"),
+            )
+
+        monkeypatch.setattr(AsyncSession, "execute", fake_execute)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.get(hashed_key)
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
 
 class TestSQLAlchemyBackendUpdate:
     """Tests for updating API keys in the SQLAlchemy backend."""
@@ -440,6 +585,48 @@ class TestSQLAlchemyBackendUpdate:
 
         assert result is not None
         assert result.is_active is False
+
+    async def test_update_does_not_leak_hash_on_statement_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a mid-query DB failure during update() never exposes key_hash.
+
+        Regression test for a transient DB failure (dropped connection, lock
+        timeout, etc.) occurring during the ``UPDATE ... WHERE key_hash = :key_hash``
+        issued by ``backend.update(key_hash, ...)`` -- including via
+        ``revoke()``/``update_last_used()``, which both call through to this
+        method on every authenticated request. SQLAlchemy's
+        ``StatementError.__str__`` renders bound parameters unless the engine is
+        configured with ``hide_parameters=True``, which this library's
+        user-supplied engine never sets. Before the fix, ``update()`` had no
+        ``except`` clause around this statement, so the raw ``StatementError`` --
+        carrying key_hash, the exact stored verifier, as a bound SQL parameter --
+        propagated straight to the caller and into any formatted traceback.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(key_id="test-123", key_hash=hashed_key, name="Test Key", scopes=["read"])
+        await sa_backend.create(hashed_key, key_info)
+
+        async def fake_execute(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise StatementError(
+                "connection reset",
+                "UPDATE api_keys SET name = ? WHERE api_keys.key_hash = ?",
+                ("New Name", hashed_key),
+                Exception("connection reset"),
+            )
+
+        monkeypatch.setattr(AsyncSession, "execute", fake_execute)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.update(hashed_key, name="New Name")
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
     async def test_update_aba_race_cannot_mutate_reused_id_row(
         self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
@@ -532,6 +719,47 @@ class TestSQLAlchemyBackendDelete:
         result = await sa_backend.delete("nonexistent_hash")
 
         assert result is False
+
+    async def test_delete_does_not_leak_hash_on_statement_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a mid-query DB failure during delete() never exposes key_hash.
+
+        Regression test for a transient DB failure (dropped connection, lock
+        timeout, etc.) occurring during the ``DELETE ... WHERE key_hash = :key_hash``
+        issued by ``backend.delete(key_hash)`` -- including via ``revoke()``'s
+        caller-facing sibling. SQLAlchemy's ``StatementError.__str__`` renders
+        bound parameters unless the engine is configured with
+        ``hide_parameters=True``, which this library's user-supplied engine
+        never sets. Before the fix, ``delete()`` had no ``except`` clause
+        around this statement, so the raw ``StatementError`` -- carrying
+        key_hash, the exact stored verifier, as a bound SQL parameter --
+        propagated straight to the caller and into any formatted traceback.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(key_id="test-123", key_hash=hashed_key, name="Test Key", scopes=["read"])
+        await sa_backend.create(hashed_key, key_info)
+
+        async def fake_execute(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise StatementError(
+                "connection reset",
+                "DELETE FROM api_keys WHERE api_keys.key_hash = ?",
+                (hashed_key,),
+                Exception("connection reset"),
+            )
+
+        monkeypatch.setattr(AsyncSession, "execute", fake_execute)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.delete(hashed_key)
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
 
     async def test_delete_removes_from_id_lookup(self, sa_backend: SQLAlchemyBackend) -> None:
         """Test that deletion means get_by_id also returns None."""

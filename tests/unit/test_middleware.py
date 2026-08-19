@@ -8,7 +8,10 @@ can be inspected precisely.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import TracebackType
 from typing import Any
+
+import pytest
 
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend
@@ -25,6 +28,30 @@ from litestar_api_auth.service import generate_api_key
 async def _dummy_app(_scope: dict[str, Any], _receive: Any, _send: Any) -> None:
     """Minimal downstream ASGI app that does nothing."""
     return
+
+
+async def _exploding_app(_scope: dict[str, Any], _receive: Any, _send: Any) -> None:
+    """Downstream ASGI app that always raises, to exercise the middleware's
+    frame locals at the point an unhandled downstream error propagates."""
+    raise RuntimeError("downstream failure")
+
+
+def _find_middleware_frame_locals(tb: TracebackType | None) -> dict[str, Any] | None:
+    """Walk a traceback and return the locals of the ``APIKeyMiddleware.__call__``
+    frame, or None if no such frame is found.
+
+    Matches on both the code object's name *and* ``self`` being the
+    middleware instance -- Litestar wraps middleware instances in its own
+    ``wrapped_call`` closures that also bind a ``self`` referencing this
+    middleware but are a different frame with no ``api_key`` local at all,
+    which would make a name-only or self-only match pass vacuously.
+    """
+    while tb is not None:
+        frame = tb.tb_frame
+        if frame.f_code.co_name == "__call__" and isinstance(frame.f_locals.get("self"), APIKeyMiddleware):
+            return frame.f_locals
+        tb = tb.tb_next
+    return None
 
 
 async def _noop_receive() -> dict[str, Any]:
@@ -365,3 +392,98 @@ class TestUpdateLastUsedIsBestEffort:
 
         assert scope["state"]["api_key"] is not None
         assert scope["state"]["api_key"].key_id == "good"
+
+
+class TestRawApiKeyScrubbedFromLocalsBeforeDownstreamApp:
+    """Regression test: the raw ``X-API-Key`` header value must not remain
+    directly bound in ``APIKeyMiddleware.__call__``'s locals (as its own
+    ``api_key``/``key_hash``/``key_info`` names) while the downstream app is
+    awaited.
+
+    Before the fix, ``api_key`` (the raw bearer key straight off the request
+    header), and ``key_hash``/``key_info`` derived from it, stayed bound in
+    this frame for the entire ``await self.app(scope, receive, send)`` call,
+    even though none of them are read again after validation. If the
+    downstream app raised, a monitoring tool capturing frame locals on
+    unhandled exceptions (e.g. Sentry with ``include_local_variables=True``)
+    could recover them straight out of the traceback. After the fix, these
+    locals are cleared before the downstream app is invoked.
+
+    Note this only removes the library's own redundant direct references.
+    It cannot -- and does not attempt to -- redact ``scope["headers"]``
+    itself: ASGI requires the original headers to remain available to
+    downstream middleware/handlers, so the raw key is still reachable via
+    ``scope`` from the downstream app's own frame. Closing that would mean
+    stripping the auth header from every downstream request, which is a
+    breaking behavior change outside the scope of this fix.
+    """
+
+    async def test_raw_key_not_in_locals_when_downstream_raises(self) -> None:
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_exploding_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(RuntimeError, match="downstream failure") as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_middleware_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware.__call__'s frame"
+        assert frame_locals.get("api_key") is None
+        assert frame_locals.get("key_hash") is None
+        assert frame_locals.get("key_info") is None
+
+
+class _UnexpectedErrorOnGetBackend(MemoryBackend):
+    """A backend whose ``get()`` raises an error outside the four expected
+    validation-failure types (not found/expired/revoked/invalid).
+
+    Mirrors a real backend bug or outage (e.g. a dropped connection) during
+    key lookup, which ``APIKeyMiddleware.__call__`` does not (and should
+    not) swallow -- unlike ``APIKeyNotFoundError`` et al., this must still
+    propagate as an unhandled error.
+    """
+
+    async def get(self, key_hash: str) -> APIKeyInfo | None:
+        msg = "backend connection dropped"
+        raise ConnectionError(msg)
+
+
+class TestRawApiKeyScrubbedFromLocalsOnUnexpectedValidationError:
+    """Regression test: an *unexpected* error during key validation (not one
+    of the four expected validation-failure exceptions) must not leave the
+    raw ``api_key`` reachable from ``APIKeyMiddleware.__call__``'s locals
+    while it propagates.
+
+    Before the fix, only the four expected validation-failure exceptions
+    were caught; any other exception raised by ``backend.get()`` (called
+    from ``_validate_api_key``, awaited at line ~150) propagated straight
+    out of ``__call__`` without ever reaching the scrub that runs just
+    before the downstream app is awaited -- so this frame's ``api_key``
+    local was still the raw key when a monitoring tool captured it.
+    """
+
+    async def test_raw_key_not_in_locals_when_validation_raises_unexpectedly(self) -> None:
+        backend = _UnexpectedErrorOnGetBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(ConnectionError, match="backend connection dropped") as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_middleware_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware.__call__'s frame"
+        assert frame_locals.get("api_key") is None

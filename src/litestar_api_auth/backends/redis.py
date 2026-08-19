@@ -223,7 +223,7 @@ class RedisBackend:
 
         # Use WATCH/MULTI for atomic uniqueness checks and writes across
         # both key_hash and key_id indexes.
-        from redis.exceptions import WatchError
+        from redis.exceptions import ResponseError, WatchError
 
         max_retries = 5
         for _ in range(max_retries):
@@ -254,6 +254,17 @@ class RedisBackend:
                 break
             except WatchError:
                 continue
+            except ResponseError:
+                # redis-py annotates a pipeline ResponseError with the full
+                # failed command (see Pipeline.annotate_exception), which for
+                # the SET/SADD calls above embeds redis_key/key_hash -- the
+                # exact stored verifier -- directly in exception.args. Raise a
+                # sanitized RuntimeError instead of re-raising it, with `from
+                # None` so the annotated original (and the key_hash inside it)
+                # doesn't surface via __context__ in debug-mode responses,
+                # logs, or error reporters.
+                msg = "Failed to create API key due to a Redis error"
+                raise RuntimeError(msg) from None
             finally:
                 await pipeline.reset()
         else:
@@ -310,7 +321,19 @@ class RedisBackend:
             return None
 
         key_hash = key_hash_raw if isinstance(key_hash_raw, str) else key_hash_raw.decode()
-        return await self.get(key_hash)
+        info = await self.get(key_hash)
+
+        # These two reads are not atomic: between resolving key_hash from
+        # the id index and fetching the record at that hash, the hash key
+        # could have been deleted and recreated (via a direct create() call
+        # bound to a different key_id) for an unrelated key. Verify the
+        # record we got back actually claims this key_id before returning
+        # it, so a caller never attributes someone else's record to the
+        # requested id.
+        if info is not None and info.key_id != key_id:
+            return None
+
+        return info
 
     async def update(self, key_hash: str, **updates: Any) -> APIKeyInfo | None:
         """Update an API key's metadata.
@@ -344,7 +367,7 @@ class RedisBackend:
         # Use WATCH/MULTI so a concurrent writer (revoke, delete, another
         # update) invalidates our transaction rather than being clobbered
         # by a stale read-modify-write.
-        from redis.exceptions import WatchError
+        from redis.exceptions import ResponseError, WatchError
 
         max_retries = 5
         for _ in range(max_retries):
@@ -369,13 +392,20 @@ class RedisBackend:
                 # already written. Without this guard, the retried (stale)
                 # timestamp would clobber the newer one on the retry's write.
                 new_last_used_at = updates.get("last_used_at", info.last_used_at)
-                if (
-                    "last_used_at" in updates
-                    and info.last_used_at is not None
-                    and new_last_used_at is not None
-                    and new_last_used_at < info.last_used_at
-                ):
-                    new_last_used_at = info.last_used_at
+                if "last_used_at" in updates and info.last_used_at is not None and new_last_used_at is not None:
+                    # Compare as UTC-aware regardless of whether either side
+                    # carries tzinfo, mirroring the naive-as-UTC convention
+                    # APIKeyInfo.is_expired already uses -- callers may store
+                    # a naive last_used_at, and comparing it directly against
+                    # update_last_used()'s aware value would raise TypeError.
+                    existing = info.last_used_at
+                    incoming = new_last_used_at
+                    if existing.tzinfo is None:
+                        existing = existing.replace(tzinfo=timezone.utc)
+                    if incoming.tzinfo is None:
+                        incoming = incoming.replace(tzinfo=timezone.utc)
+                    if incoming < existing:
+                        new_last_used_at = info.last_used_at
 
                 # Create updated info with new values, mirroring the memory backend pattern
                 updated_info = APIKeyInfo(
@@ -411,6 +441,22 @@ class RedisBackend:
                 return updated_info
             except WatchError:
                 continue
+            except ResponseError:
+                # redis-py annotates a pipeline ResponseError with the full
+                # failed command (see Pipeline.annotate_exception), which for
+                # the SET above embeds redis_key/key_hash -- the exact stored
+                # verifier -- directly in exception.args. This is reachable
+                # in practice: KEEPTTL requires Redis 6.0+, so every update()
+                # (and update_last_used(), invoked on every authenticated
+                # request) raises ResponseError here against an older server.
+                # Raise a sanitized RuntimeError instead of re-raising it,
+                # with `from None` so the annotated original (and the
+                # key_hash inside it) doesn't surface via __context__ in
+                # debug-mode responses, logs, or error reporters. RuntimeError
+                # also matches what middleware.py's update_last_used() call
+                # already treats as a best-effort failure to suppress.
+                msg = "Failed to update API key due to a Redis error"
+                raise RuntimeError(msg) from None
             finally:
                 await pipeline.reset()
 
@@ -448,7 +494,7 @@ class RedisBackend:
 
         redis_key = self._make_key(key_hash)
 
-        from redis.exceptions import WatchError
+        from redis.exceptions import ResponseError, WatchError
 
         max_retries = 5
         for _ in range(max_retries):
@@ -472,6 +518,18 @@ class RedisBackend:
                 return True
             except WatchError:
                 continue
+            except ResponseError:
+                # redis-py annotates a pipeline ResponseError with the full
+                # failed command (see Pipeline.annotate_exception), which for
+                # the DELETE/SREM calls above embeds redis_key/id_key/key_hash
+                # -- the exact stored verifier -- directly in exception.args.
+                # Raise a sanitized RuntimeError instead of re-raising it,
+                # with `from None` so the annotated original (and the
+                # key_hash inside it) doesn't surface via __context__ in
+                # debug-mode responses, logs, or error reporters, mirroring
+                # create()'s and update()'s identical handling.
+                msg = "Failed to delete API key due to a Redis error"
+                raise RuntimeError(msg) from None
             finally:
                 await pipeline.reset()
 
@@ -534,7 +592,7 @@ class RedisBackend:
         # update(), to re-check existence at the moment of removal and skip
         # the SREM if the key came back.
         if stale_hashes:
-            from redis.exceptions import WatchError
+            from redis.exceptions import ResponseError, WatchError
 
             for stale_hash in stale_hashes:
                 redis_key = self._make_key(stale_hash)
@@ -554,6 +612,16 @@ class RedisBackend:
                     # Key changed concurrently between WATCH and EXEC;
                     # leave the tracking entry alone rather than risk
                     # removing a live key.
+                    continue
+                except ResponseError:
+                    # redis-py annotates a pipeline ResponseError with the
+                    # full failed command (see Pipeline.annotate_exception),
+                    # which for the SREM call above embeds stale_hash directly
+                    # in exception.args. This cleanup is best-effort (list()
+                    # has already computed its results), so swallow it exactly
+                    # like WatchError -- leaving the tracking entry alone --
+                    # rather than letting a hash-bearing exception escape
+                    # list() entirely over a single stale entry.
                     continue
                 finally:
                     await pipeline.reset()

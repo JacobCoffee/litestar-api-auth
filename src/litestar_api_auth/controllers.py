@@ -123,7 +123,19 @@ class APIKeyController(Controller):
             metadata=data.metadata or {},
         )
 
-        created_key = await backend.create(key_hash, key_info)
+        try:
+            created_key = await backend.create(key_hash, key_info)
+        except BaseException:
+            # Scrub the raw key material from this frame before the error
+            # propagates. Without this, plaintext_key/key_hash/key_info stay
+            # live frame locals for as long as the exception's traceback is
+            # held, so a monitoring tool that captures frame locals on
+            # unhandled exceptions (e.g. Sentry's include_local_variables)
+            # could recover the plaintext bearer key straight out of the
+            # traceback -- this is the only place in the library where the
+            # *raw* key, not just its hash, is reachable that way.
+            plaintext_key = key_hash = key_info = None
+            raise
 
         return CreateAPIKeyResponse(
             key_id=created_key.key_id,

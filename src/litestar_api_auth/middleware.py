@@ -176,6 +176,16 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # (or a race-aware update_last_used()) fails.
                 # Guards will handle the missing key appropriately
                 pass
+            except BaseException:
+                # An *unexpected* error (a backend bug/outage, not one of the
+                # known validation-failure types above) is about to propagate
+                # out of this frame while it still holds the raw api_key (and
+                # possibly key_hash/key_info). Scrub them first so a
+                # monitoring tool that captures frame locals on unhandled
+                # exceptions (e.g. Sentry's include_local_variables) cannot
+                # recover them from this frame's traceback entry.
+                api_key = key_hash = key_info = None
+                raise
             else:
                 # Store the APIKeyInfo in request state for guards to access.
                 # key_hash is redacted first: it's the SHA-256 verifier used
@@ -184,6 +194,19 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # guards.get_api_key_info's docstring) would otherwise
                 # serialize the hash into the HTTP response.
                 scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
+
+        # None of api_key/key_hash/key_info are needed past this point (the
+        # key has already been hashed and, if valid, handed off via
+        # scope["state"]["api_key"] above as a key_hash-redacted copy).
+        # Clear them from this frame before awaiting the downstream app so
+        # they can't be recovered from this frame's locals if a monitoring
+        # tool captures them on an unhandled downstream exception (e.g.
+        # Sentry's include_local_variables). This cannot, however, scrub the
+        # raw header value out of scope["headers"] itself -- ASGI requires
+        # the original headers to remain available to downstream
+        # middleware/handlers, so a frame-locals capture of the *downstream*
+        # app's own frame can still observe the raw key via scope.
+        api_key = key_hash = key_info = None
 
         # Continue processing the request
         await self.app(scope, receive, send)

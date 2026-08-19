@@ -265,17 +265,27 @@ class SQLAlchemyBackend:
 
         Raises:
             ValueError: If a key with the same hash or ID already exists.
-            RuntimeError: If the engine is not configured.
+            RuntimeError: If the engine is not configured, or if the insert
+                fails due to a database error.
         """
         if self._sessionmaker is None:
             msg = "Engine is not configured. Set config.engine before calling create()."
             raise RuntimeError(msg)
 
-        from advanced_alchemy.exceptions import DuplicateKeyError
-        from sqlalchemy.exc import IntegrityError
+        from advanced_alchemy.exceptions import DuplicateKeyError, IntegrityError, RepositoryError
+        from sqlalchemy.exc import IntegrityError as SQLAlchemyIntegrityError
 
         created_at = info.created_at if info.created_at is not None else datetime.now(timezone.utc)
 
+        # `error_to_raise` is raised *after* this try/except/else, rather than
+        # from inside an `except` clause via `raise ... from None`: `from None`
+        # only sets `__suppress_context__` (which standard traceback formatting
+        # and Sentry's chain walker both honor), but leaves the caught exception
+        # -- and, through it, key_hash as a bound SQL parameter on `__cause__`
+        # -- reachable via `__context__` for anything that walks the raw
+        # exception graph. Raising once the handler has exited leaves
+        # `__context__` unset entirely, so there is nothing left to walk.
+        error_to_raise: ValueError | RuntimeError | None = None
         try:
             async with self._sessionmaker() as session:
                 svc = self._make_service(session)
@@ -293,25 +303,50 @@ class SQLAlchemyBackend:
                     },
                     auto_commit=True,
                 )
-                return _model_to_info(result)
         except (IntegrityError, DuplicateKeyError) as exc:
-            # Do not chain the DB exception via `from exc` on any of these
-            # branches: the original IntegrityError's statement/params can
-            # retain key_hash (the exact stored verifier used for backend
-            # lookups) as a bound SQL parameter regardless of which
-            # constraint failed, so chaining it would surface the hash in
-            # debug-mode responses, logs, and error reporters that capture
-            # tracebacks. `key_hash` itself is also never interpolated into
-            # a message below.
-            detail = str(exc).lower()
-            if "key_id" in detail:
-                msg = f"API key with ID {info.key_id} already exists"
-                raise ValueError(msg) from None
-            if "key_hash" in detail:
-                msg = "API key with this hash already exists"
-                raise ValueError(msg) from None
-            msg = "API key with the same hash or ID already exists"
-            raise ValueError(msg) from None
+            # These are Advanced Alchemy's own exception classes, not
+            # SQLAlchemy's: ``APIKeyService.create`` wraps every underlying
+            # ``sqlalchemy.exc`` failure via ``wrap_sqlalchemy_exception``
+            # (``wrap_exceptions`` defaults to ``True`` and is never
+            # overridden here), so a raw ``sqlalchemy.exc.IntegrityError``
+            # never actually reaches this call site -- only the wrapped
+            # ``IntegrityError``/``DuplicateKeyError`` do, chained (``from
+            # exc``) to the original SQLAlchemy error as ``__cause__``.
+            #
+            # Crucially, that wrapper funnels *every* non-constraint
+            # ``StatementError`` (e.g. ``OperationalError`` from a dropped
+            # connection or lock timeout) into this same wrapped
+            # ``IntegrityError`` class -- it is not exclusive to genuine
+            # constraint violations. ``DuplicateKeyError`` is: Advanced
+            # Alchemy only raises it from the branch that already confirmed
+            # ``exc.__cause__`` is a real ``sqlalchemy.exc.IntegrityError``.
+            # So a bare ``IntegrityError`` must still check its cause's
+            # *type* (never its string contents -- that would risk
+            # rendering key_hash) to tell an actual constraint violation
+            # apart from a transient failure that only looks like one.
+            if isinstance(exc, DuplicateKeyError) or isinstance(exc.__cause__, SQLAlchemyIntegrityError):
+                detail = str(exc).lower()
+                if "key_id" in detail:
+                    error_to_raise = ValueError(f"API key with ID {info.key_id} already exists")
+                elif "key_hash" in detail:
+                    error_to_raise = ValueError("API key with this hash already exists")
+                else:
+                    error_to_raise = ValueError("API key with the same hash or ID already exists")
+            else:
+                error_to_raise = RuntimeError("Failed to create API key due to a database error")
+        except RepositoryError:
+            # Catches whatever ``wrap_sqlalchemy_exception`` wraps the
+            # remaining failure modes into (a non-``IntegrityError``
+            # ``InvalidRequestError``, or the catch-all ``RepositoryError``
+            # for a bare ``SQLAlchemyError``/``AttributeError``) --
+            # ``RepositoryError`` is the base of every class that wrapper
+            # raises, so this is the backstop for anything not already
+            # handled above.
+            error_to_raise = RuntimeError("Failed to create API key due to a database error")
+        else:
+            return _model_to_info(result)
+
+        raise error_to_raise
 
     async def get(self, key_hash: str) -> APIKeyInfo | None:
         """Retrieve an API key by its hash.
@@ -321,16 +356,45 @@ class SQLAlchemyBackend:
 
         Returns:
             The APIKeyInfo if found, None otherwise.
+
+        Raises:
+            RuntimeError: If the lookup fails due to a database error.
         """
         if self._sessionmaker is None:
             return None
 
-        async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+        from advanced_alchemy.exceptions import RepositoryError
+
+        # See the comment in create() on why the RuntimeError below is raised
+        # after this try/except/else instead of via `raise ... from None`
+        # inside the `except` clause: that only suppresses the chain from
+        # standard traceback formatting, it doesn't clear `__context__`.
+        error_to_raise: RuntimeError | None = None
+        try:
+            async with self._sessionmaker() as session:
+                svc = self._make_service(session)
+                model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+        except RepositoryError:
+            # SQLAlchemy engines default to hide_parameters=False, and the
+            # engine is user-supplied so this library never sets it -- a
+            # StatementError/OperationalError here (e.g. a dropped
+            # connection or lock timeout) renders key_hash, the exact
+            # stored verifier used for this lookup, as a bound SQL
+            # parameter in str(exc). ``get_one_or_none`` never lets that raw
+            # SQLAlchemy exception escape, though: it wraps every failure via
+            # ``wrap_sqlalchemy_exception`` into an ``AdvancedAlchemyError``
+            # subclass (``wrap_exceptions`` defaults to ``True`` and is never
+            # overridden here), always chaining the original as
+            # ``__cause__``. Catching ``sqlalchemy.exc.StatementError`` alone
+            # would therefore never fire, and the hash would still reach a
+            # formatted traceback via that chain.
+            error_to_raise = RuntimeError("Failed to retrieve API key due to a database error")
+        else:
             if model is None:
                 return None
             return _model_to_info(model)
+
+        raise error_to_raise
 
     async def get_by_id(self, key_id: str) -> APIKeyInfo | None:
         """Retrieve an API key by its unique ID.
@@ -360,11 +424,15 @@ class SQLAlchemyBackend:
 
         Returns:
             The updated APIKeyInfo if found, None otherwise.
+
+        Raises:
+            RuntimeError: If the update fails due to a database error.
         """
         if self._sessionmaker is None:
             return None
 
         from sqlalchemy import update as sa_update
+        from sqlalchemy.exc import StatementError
 
         # Map the "metadata" kwarg to the model's "metadata_" column
         update_data: dict[str, Any] = {}
@@ -395,13 +463,33 @@ class SQLAlchemyBackend:
             # (never by id) inside the same transaction instead, so this second
             # round trip can only ever resolve to the row the UPDATE above just
             # wrote, never to an unrelated row.
-            await session.execute(sa_update(self._model).where(self._model.key_hash == key_hash).values(**update_data))
-            model = await session.scalar(select(self._model).where(self._model.key_hash == key_hash))
-            if model is None:
-                await session.rollback()
-                return None
-            await session.commit()
-            return _model_to_info(model)
+            # error_to_raise is raised after this try/except/else -- see the
+            # comment in create() on why: `raise ... from None` inside the
+            # `except` clause would only suppress the chain from standard
+            # traceback formatting, not clear `__context__` itself.
+            error_to_raise: RuntimeError | None = None
+            try:
+                await session.execute(
+                    sa_update(self._model).where(self._model.key_hash == key_hash).values(**update_data)
+                )
+                model = await session.scalar(select(self._model).where(self._model.key_hash == key_hash))
+            except StatementError:
+                # Both statements above bind key_hash as a SQL parameter.
+                # SQLAlchemy engines default to hide_parameters=False, and
+                # the engine is user-supplied so this library never sets
+                # it, so an unhandled StatementError/OperationalError here
+                # (e.g. a dropped connection or lock timeout) would put the
+                # exact stored verifier into a 500 response, logs, or an
+                # error reporter's captured traceback.
+                error_to_raise = RuntimeError("Failed to update API key due to a database error")
+            else:
+                if model is None:
+                    await session.rollback()
+                    return None
+                await session.commit()
+                return _model_to_info(model)
+
+            raise error_to_raise
 
     async def delete(self, key_hash: str) -> bool:
         """Delete an API key from the database.
@@ -411,11 +499,15 @@ class SQLAlchemyBackend:
 
         Returns:
             True if the key was deleted, False if not found.
+
+        Raises:
+            RuntimeError: If the delete fails due to a database error.
         """
         if self._sessionmaker is None:
             return False
 
         from sqlalchemy import delete as sa_delete
+        from sqlalchemy.exc import StatementError
 
         async with self._sessionmaker() as session:
             # A single DELETE ... WHERE key_hash = :key_hash keeps the write scoped
@@ -424,9 +516,26 @@ class SQLAlchemyBackend:
             # is avoided. `rowcount` is enough to know whether a row matched: unlike
             # an UPDATE whose new values might equal the old ones, a DELETE always
             # reports the row it removed.
-            result = await session.execute(sa_delete(self._model).where(self._model.key_hash == key_hash))
-            await session.commit()
-            return result.rowcount > 0
+            # error_to_raise is raised after this try/except/else -- see the
+            # comment in create() on why: `raise ... from None` inside the
+            # `except` clause would only suppress the chain from standard
+            # traceback formatting, not clear `__context__` itself.
+            error_to_raise: RuntimeError | None = None
+            try:
+                result = await session.execute(sa_delete(self._model).where(self._model.key_hash == key_hash))
+                await session.commit()
+            except StatementError:
+                # The DELETE above binds key_hash as a SQL parameter.
+                # SQLAlchemy engines default to hide_parameters=False, and
+                # the engine is user-supplied so this library never sets
+                # it, so an unhandled StatementError/OperationalError here
+                # would put the exact stored verifier into a 500 response,
+                # logs, or an error reporter's captured traceback.
+                error_to_raise = RuntimeError("Failed to delete API key due to a database error")
+            else:
+                return result.rowcount > 0
+
+            raise error_to_raise
 
     async def list(
         self,

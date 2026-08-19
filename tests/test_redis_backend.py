@@ -114,6 +114,42 @@ class TestRedisBackendCreate:
         assert hashed_key not in str(exc_info.value)
         assert str(exc_info.value) == "API key with this hash already exists"
 
+    async def test_create_pipeline_response_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
+        """A Redis-level pipeline failure in create() must not embed key_hash either.
+
+        redis-py annotates a failed pipelined command with its full argument
+        list (see ``Pipeline.annotate_exception``), which for the SET/SADD
+        calls in create()'s MULTI block includes the raw key_hash. This
+        forces that exact failure -- by corrupting the all_keys tracking key
+        to the wrong Redis type so the pipelined SADD errors server-side --
+        without tripping the earlier hash_exists/id_exists checks, and
+        asserts the resulting exception is sanitized like the duplicate-hash
+        ValueError above.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        # SADD against a string-typed key raises WRONGTYPE from Redis itself,
+        # which redis-py surfaces as a ResponseError whose message embeds the
+        # full pipelined command (including key_hash) unless sanitized.
+        await redis_backend._client.set(redis_backend._all_keys_key, "not-a-set")
+
+        info = APIKeyInfo(
+            key_id="test-789",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await redis_backend.create(hashed_key, info)
+
+        assert hashed_key not in str(exc_info.value)
+        # `from None` suppresses the original ResponseError from traceback
+        # rendering (matching the SQLAlchemy backend's identical convention)
+        # even though CPython still tracks it on __context__ internally.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+
     async def test_create_duplicate_id(self, redis_backend: RedisBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
         _, hashed_key1 = generate_api_key("test_")
@@ -271,6 +307,74 @@ class TestRedisBackendGet:
 
         assert result is None
 
+    async def test_get_by_id_rejects_aba_hash_reuse(self, redis_backend: RedisBackend) -> None:
+        """Regression test for an ABA race between get_by_id()'s two reads.
+
+        get_by_id() is not atomic: it resolves key_hash from the id index,
+        then fetches the record at that hash as a second, separate read. If
+        the hash key is deleted and recreated (bound to a different key_id)
+        in the window between those two reads -- e.g. a caller deliberately
+        reusing a hash -- the second read returns a record that belongs to
+        someone else's id.
+
+        This forces that exact interleaving: a concurrent delete()+create()
+        recreates the same hash under a different key_id right after
+        get_by_id()'s id-index read returns, but before its follow-up get()
+        runs. Without the info.key_id verification, get_by_id() would
+        return the replacement record and attribute it to the original id.
+        """
+        _, hashed_key = generate_api_key("test_")
+        original_info = APIKeyInfo(
+            key_id="aba-original-id",
+            key_hash=hashed_key,
+            name="Original Key",
+            scopes=["read"],
+            is_active=True,
+        )
+        await redis_backend.create(hashed_key, original_info)
+
+        replacement_info = APIKeyInfo(
+            key_id="aba-replacement-id",
+            key_hash=hashed_key,
+            name="Replacement Key",
+            scopes=["write"],
+            is_active=True,
+        )
+
+        client = redis_backend._client
+        id_key = redis_backend._make_id_key("aba-original-id")
+        original_get = client.get
+        triggered = False
+
+        async def racing_get(key: str, *args: Any, **kwargs: Any) -> Any:
+            nonlocal triggered
+            result = await original_get(key, *args, **kwargs)
+            # Land the concurrent delete+recreate strictly after get_by_id()'s
+            # id-index read has returned key_hash, but before its follow-up
+            # get(key_hash) call runs.
+            if key == id_key and not triggered:
+                triggered = True
+                await redis_backend.delete(hashed_key)
+                await redis_backend.create(hashed_key, replacement_info)
+            return result
+
+        client.get = racing_get
+        try:
+            result = await redis_backend.get_by_id("aba-original-id")
+        finally:
+            client.get = original_get
+
+        assert triggered
+        # The hash now holds the replacement record (a different key_id).
+        # get_by_id("aba-original-id") must not attribute it to the
+        # original id -- it must report the original id as gone rather
+        # than returning someone else's record.
+        assert result is None
+        # The replacement record is still correctly reachable by its own id.
+        by_replacement_id = await redis_backend.get_by_id("aba-replacement-id")
+        assert by_replacement_id is not None
+        assert by_replacement_id.key_id == "aba-replacement-id"
+
     async def test_get_preserves_metadata(self, redis_backend: RedisBackend) -> None:
         """Test that metadata round-trips correctly through JSON serialization."""
         _, hashed_key = generate_api_key("test_")
@@ -374,6 +478,64 @@ class TestRedisBackendUpdate:
 
         assert retrieved is not None
         assert retrieved.name == "Persisted Name"
+
+    async def test_update_pipeline_response_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
+        """A Redis-level pipeline failure in update() must not embed key_hash either.
+
+        redis-py annotates a failed pipelined command with its full argument
+        list (see ``Pipeline.annotate_exception``), which for update()'s
+        ``SET ... KEEPTTL XX`` call includes the raw key_hash embedded in
+        redis_key. This is a real, reachable failure mode: KEEPTTL requires
+        Redis server 6.0+, so every update() call -- including
+        update_last_used(), which the middleware invokes on every
+        authenticated request -- raises exactly this ResponseError against
+        an older server. Forces the pipeline's EXEC to fail with such an
+        error and asserts update() sanitizes it the same way create() does,
+        instead of letting the hash-bearing ResponseError escape (which the
+        middleware's ``contextlib.suppress(RuntimeError)`` would not catch).
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        client = redis_backend._client
+        redis_key = redis_backend._make_key(hashed_key)
+        original_pipeline_factory = client.pipeline
+
+        def failing_pipeline_factory(*args: Any, **kwargs: Any) -> Any:
+            pipeline = original_pipeline_factory(*args, **kwargs)
+
+            async def failing_execute(*a: Any, **kw: Any) -> Any:
+                from redis.exceptions import ResponseError
+
+                # Mirrors redis-py's real annotation: the failed command and
+                # its full arguments (including the raw key_hash) folded into
+                # the exception message.
+                msg = f"SET {redis_key} '<serialized>' KEEPTTL XX: ERR syntax error"
+                raise ResponseError(msg)
+
+            pipeline.execute = failing_execute
+            return pipeline
+
+        client.pipeline = failing_pipeline_factory
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                await redis_backend.update(hashed_key, name="Updated Name")
+        finally:
+            client.pipeline = original_pipeline_factory
+
+        assert hashed_key not in str(exc_info.value)
+        assert str(exc_info.value) == "Failed to update API key due to a Redis error"
+        # `from None` suppresses the original ResponseError from traceback
+        # rendering (matching create()'s identical convention) even though
+        # CPython still tracks it on __context__ internally.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
 
 
 class TestRedisBackendDelete:
@@ -558,6 +720,57 @@ class TestRedisBackendDelete:
         assert await redis_backend.get(hashed_key) is None
         remaining = await client.smembers(redis_backend._all_keys_key)
         assert hashed_key not in remaining
+
+    async def test_delete_pipeline_response_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
+        """A Redis-level pipeline failure in delete() must not embed key_hash either.
+
+        Same disclosure mechanism as create()'s and update()'s equivalent
+        regression tests: redis-py annotates a failed pipelined command with
+        its full argument list (see ``Pipeline.annotate_exception``), which
+        for delete()'s DEL/SREM calls includes the raw key_hash embedded in
+        redis_key. Forces the pipeline's EXEC to fail with such an error and
+        asserts delete() sanitizes it instead of letting the hash-bearing
+        ResponseError escape.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        client = redis_backend._client
+        redis_key = redis_backend._make_key(hashed_key)
+        original_pipeline_factory = client.pipeline
+
+        def failing_pipeline_factory(*args: Any, **kwargs: Any) -> Any:
+            pipeline = original_pipeline_factory(*args, **kwargs)
+
+            async def failing_execute(*a: Any, **kw: Any) -> Any:
+                from redis.exceptions import ResponseError
+
+                # Mirrors redis-py's real annotation: the failed command and
+                # its full arguments (including the raw key_hash) folded into
+                # the exception message.
+                msg = f"DEL {redis_key}: ERR some Redis-level failure"
+                raise ResponseError(msg)
+
+            pipeline.execute = failing_execute
+            return pipeline
+
+        client.pipeline = failing_pipeline_factory
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                await redis_backend.delete(hashed_key)
+        finally:
+            client.pipeline = original_pipeline_factory
+
+        assert hashed_key not in str(exc_info.value)
+        assert str(exc_info.value) == "Failed to delete API key due to a Redis error"
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
 
 
 class TestRedisBackendList:
@@ -804,6 +1017,66 @@ class TestRedisBackendList:
             hashed_key in remaining
         ), "WATCH must abort the cleanup transaction when the key is recreated between the re-check GET and EXEC"
 
+    async def test_list_cleanup_response_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
+        """A Redis-level pipeline failure in list()'s stale-cleanup must not embed key_hash either.
+
+        Same disclosure mechanism as create()'s/update()'s/delete()'s
+        equivalent regression tests: redis-py annotates a failed pipelined
+        command with its full argument list (see
+        ``Pipeline.annotate_exception``), which for the cleanup loop's SREM
+        call includes the raw stale hash. Since this cleanup is best-effort,
+        list() must swallow the error (leaving the tracking entry alone, same
+        as it already does for WatchError) rather than let a hash-bearing
+        exception escape list() entirely over a single stale entry.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="stale-response-error-1",
+            key_hash=hashed_key,
+            name="Stale Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        # Simulate external expiry, as in the sibling stale-cleanup tests.
+        client = redis_backend._client
+        redis_key = redis_backend._make_key(hashed_key)
+        await client.delete(redis_key, redis_backend._make_id_key("stale-response-error-1"))
+
+        original_pipeline_factory = client.pipeline
+
+        def failing_pipeline_factory(*args: Any, **kwargs: Any) -> Any:
+            pipeline = original_pipeline_factory(*args, **kwargs)
+            original_execute = pipeline.execute
+
+            async def failing_execute(*a: Any, **kw: Any) -> Any:
+                # Only the cleanup transaction's EXEC (queued after multi())
+                # should fail; let the watch/get-only calls pass through.
+                if pipeline.explicit_transaction:
+                    from redis.exceptions import ResponseError
+
+                    msg = f"SREM {redis_backend._all_keys_key} {hashed_key}: ERR some Redis-level failure"
+                    raise ResponseError(msg)
+                return await original_execute(*a, **kw)
+
+            pipeline.execute = failing_execute
+            return pipeline
+
+        client.pipeline = failing_pipeline_factory
+        try:
+            result = await redis_backend.list()
+        finally:
+            client.pipeline = original_pipeline_factory
+
+        # list() itself must not raise -- the failure is swallowed exactly
+        # like a WatchError, and the hash never appears in a propagated
+        # exception because there is no propagated exception at all.
+        assert result == []
+        remaining = await client.smembers(redis_backend._all_keys_key)
+        assert (
+            hashed_key in remaining
+        ), "cleanup left the tracking entry alone after a ResponseError, same as WatchError"
+
 
 class TestRedisBackendRevoke:
     """Tests for revoking API keys."""
@@ -936,6 +1209,36 @@ class TestRedisBackendUpdateLastUsed:
         retrieved = await redis_backend.get(hashed_key)
         assert retrieved is not None
         assert retrieved.last_used_at == newer
+
+    async def test_update_last_used_with_naive_stored_timestamp(self, redis_backend: RedisBackend) -> None:
+        """The monotonicity guard must not raise on a naive stored timestamp.
+
+        APIKeyInfo.is_expired treats a naive last_used_at as UTC, so callers
+        may legitimately store one directly (bypassing update_last_used()'s
+        own tz-aware datetime.now(timezone.utc)). The guard added to close
+        the backward-timestamp race must compare naive and aware values as
+        equivalent UTC instants instead of raising
+        ``TypeError: can't compare offset-naive and offset-aware datetimes``.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+            last_used_at=datetime.now() - timedelta(days=1),
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        # Should not raise despite comparing a naive stored value against
+        # update_last_used()'s tz-aware datetime.now(timezone.utc).
+        await redis_backend.update_last_used(hashed_key)
+
+        retrieved = await redis_backend.get(hashed_key)
+        assert retrieved is not None
+        assert retrieved.last_used_at is not None
+        assert (datetime.now(timezone.utc) - retrieved.last_used_at) < timedelta(minutes=1)
 
 
 class TestRedisBackendClose:
@@ -1428,3 +1731,37 @@ class TestRedisBackendIntegration:
 
         assert await redis_backend.get(hashed_key) is None, "deleted key must not be recreated by update_last_used()"
         assert await redis_backend.get_by_id("race-delete-1") is None
+
+    async def test_update_last_used_retry_does_not_move_backward(self, redis_backend: RedisBackend) -> None:
+        """A stale, WATCH-retried update_last_used() must not roll last_used_at backward.
+
+        Forces the exact interleaving from the failure scenario using
+        `_race_update_last_used`: update_last_used() reads the record with
+        its own (real-time, effectively-older) timestamp, a concurrent write
+        carrying a strictly newer last_used_at commits and wins the WATCH
+        race, and update_last_used() then retries against that fresh record.
+        The retry must preserve the newer timestamp instead of clobbering it
+        with its own stale one.
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(
+            key_id="race-lastused-1",
+            key_hash=hashed_key,
+            name="Race Last-Used Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        newer = datetime.now(timezone.utc) + timedelta(seconds=5)
+
+        await self._race_update_last_used(
+            redis_backend,
+            hashed_key,
+            lambda: redis_backend.update(hashed_key, last_used_at=newer),
+        )
+
+        final = await redis_backend.get(hashed_key)
+        assert final is not None
+        assert (
+            final.last_used_at == newer
+        ), "a stale update_last_used() retry must not roll last_used_at backward past a newer concurrent write"

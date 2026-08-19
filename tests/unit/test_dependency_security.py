@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 from packaging.version import Version
 
 if sys.version_info >= (3, 11):
@@ -72,3 +73,351 @@ def test_installed_urllib3_above_vulnerable_versions() -> None:
         f"urllib3 {installed_version} is vulnerable to GHSA-mf9v-mfxr-j63j "
         "and/or GHSA-qccp-gfcp-xxvc; run `uv sync` to match the updated lock file."
     )
+
+
+_PYPROJECT_FILE = Path(__file__).parents[2] / "pyproject.toml"
+
+_LITESTAR_MIN_VERSION = Version("2.22.0")
+"""Versions below this are vulnerable to:
+
+- PYSEC-2026-2195, PYSEC-2026-2196, PYSEC-2026-2197 (fixed in 2.20.0)
+- PYSEC-2026-2603, PYSEC-2026-2604 (fixed in 2.22.0)
+
+litestar is this library's sole runtime dependency, so a vulnerable locked
+version or an unbounded ``pyproject.toml`` floor both let downstream
+resolvers keep an affected release installed.
+"""
+
+
+def test_uv_lock_pins_litestar_above_vulnerable_versions() -> None:
+    """uv.lock must not pin a litestar affected by the advisories above.
+
+    Before this fix, uv.lock pinned litestar 2.18.0, which is vulnerable to
+    all five advisories; this assertion would have failed against that lock
+    file.
+    """
+    lock_data = tomllib.loads(_LOCK_FILE.read_text())
+    litestar_entries = [pkg for pkg in lock_data["package"] if pkg["name"] == "litestar"]
+
+    assert litestar_entries, "litestar not found in uv.lock"
+
+    for entry in litestar_entries:
+        locked_version = Version(entry["version"])
+        assert locked_version >= _LITESTAR_MIN_VERSION, (
+            f"uv.lock pins litestar {locked_version}, which is vulnerable to "
+            "PYSEC-2026-2195/2196/2197/2603/2604; run "
+            "`uv lock --upgrade-package litestar` to update it."
+        )
+
+
+def test_installed_litestar_above_vulnerable_versions() -> None:
+    """The synced environment must match the lock file's fixed litestar.
+
+    Complements the uv.lock check above by catching an environment that
+    drifted from the lock file (e.g. `.venv` synced before the lock was
+    upgraded).
+    """
+    try:
+        installed_version = Version(importlib.metadata.version("litestar"))
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("litestar not installed")
+
+    assert installed_version >= _LITESTAR_MIN_VERSION, (
+        f"litestar {installed_version} is vulnerable to "
+        "PYSEC-2026-2195/2196/2197/2603/2604; run `uv sync` to match the updated lock file."
+    )
+
+
+def test_pyproject_litestar_floor_excludes_vulnerable_versions() -> None:
+    """``pyproject.toml``'s ``litestar`` floor must exclude the vulnerable range.
+
+    Before this fix, the floor was ``litestar>=2.0``, which lets a downstream
+    resolver with an existing constraint or lock in the 2.0-2.21 range install
+    a vulnerable litestar even though this library's own metadata declares it
+    acceptable. This assertion would have failed against that floor.
+    """
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    requirements = [Requirement(dep) for dep in pyproject_data["project"]["dependencies"]]
+    litestar_req = next((req for req in requirements if req.name == "litestar"), None)
+
+    assert litestar_req is not None, "litestar not found in [project.dependencies]"
+
+    lower_bounds = [spec.version for spec in litestar_req.specifier if spec.operator in (">=", ">", "==", "~=")]
+    assert lower_bounds, f"litestar requirement {litestar_req!r} has no lower-bound specifier"
+    assert all(Version(bound) >= _LITESTAR_MIN_VERSION for bound in lower_bounds), (
+        f"pyproject.toml's litestar requirement is {litestar_req!r}, which still permits "
+        "versions vulnerable to PYSEC-2026-2195/2196/2197/2603/2604"
+    )
+
+
+_MULTIPART_MIN_VERSION = Version("1.3.1")
+"""Versions below this are vulnerable to:
+
+- PYSEC-2026-2670: ReDoS (catastrophic backtracking) via crafted multipart
+  form bodies, fixed in 1.3.1.
+
+multipart is pulled in transitively via litestar's own multipart form
+handling, and litestar>=2.22.0 still allows ``multipart>=1.2.0``, so bumping
+litestar's floor alone does not exclude the vulnerable release; a lock file
+or downstream resolver could still land on 1.3.0.
+"""
+
+
+def test_uv_lock_pins_multipart_above_vulnerable_versions() -> None:
+    """uv.lock must not pin a multipart affected by PYSEC-2026-2670.
+
+    Before this fix, uv.lock pinned multipart 1.3.0, which is vulnerable;
+    this assertion would have failed against that lock file.
+    """
+    lock_data = tomllib.loads(_LOCK_FILE.read_text())
+    multipart_entries = [pkg for pkg in lock_data["package"] if pkg["name"] == "multipart"]
+
+    assert multipart_entries, "multipart not found in uv.lock; expected it as a transitive dependency"
+
+    for entry in multipart_entries:
+        locked_version = Version(entry["version"])
+        assert locked_version >= _MULTIPART_MIN_VERSION, (
+            f"uv.lock pins multipart {locked_version}, which is vulnerable to "
+            "PYSEC-2026-2670; run `uv lock --upgrade-package multipart` to update it."
+        )
+
+
+def test_installed_multipart_above_vulnerable_versions() -> None:
+    """The synced environment must match the lock file's fixed multipart.
+
+    Complements the uv.lock check above by catching an environment that
+    drifted from the lock file (e.g. `.venv` synced before the lock was
+    upgraded).
+    """
+    try:
+        installed_version = Version(importlib.metadata.version("multipart"))
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip("multipart not installed")
+
+    assert (
+        installed_version >= _MULTIPART_MIN_VERSION
+    ), f"multipart {installed_version} is vulnerable to PYSEC-2026-2670; run `uv sync` to match the updated lock file."
+
+
+_TRANSITIVE_MIN_VERSIONS = {
+    "starlette": (
+        Version("1.3.1"),
+        "PYSEC-2026-249",
+        "sphinx-autobuild in the docs dependency group",
+    ),
+    "requests": (
+        Version("2.33.0"),
+        "PYSEC-2026-2275 (also PYSEC-2026-1872, PYSEC-2026-1873)",
+        "sphinx in the docs dependency group",
+    ),
+    "click": (
+        Version("8.3.3"),
+        "PYSEC-2026-2132",
+        "litestar's CLI extras (runtime)",
+    ),
+    "idna": (
+        Version("3.15"),
+        "PYSEC-2026-215",
+        "anyio/httpx via litestar (runtime)",
+    ),
+    "pygments": (
+        Version("2.20.0"),
+        "PYSEC-2026-2987",
+        "rich via litestar (runtime)",
+    ),
+    "mako": (
+        Version("1.3.12"),
+        "PYSEC-2026-2617 (also PYSEC-2026-88)",
+        "alembic via advanced-alchemy's `sqlalchemy` extra (runtime for that extra)",
+    ),
+}
+"""Transitive dependencies with a known-vulnerable version below the given floor.
+
+Each of these is not a direct ``[project.dependencies]``/dependency-group
+entry, so the only floor available is a ``[tool.uv] constraint-dependencies``
+pin (mirroring the ``multipart`` pattern above). Before this fix, uv.lock
+pinned versions below every one of these floors and no constraint existed;
+these assertions would have failed against that state.
+"""
+
+
+@pytest.mark.parametrize(("package_name", "spec"), sorted(_TRANSITIVE_MIN_VERSIONS.items()))
+def test_uv_lock_pins_transitive_dependency_above_vulnerable_version(
+    package_name: str, spec: tuple[Version, str, str]
+) -> None:
+    """uv.lock must not pin a known-vulnerable version of a transitive dependency.
+
+    Before this fix, uv.lock pinned starlette 0.50.0, requests 2.32.5,
+    click 8.3.1, idna 3.11, pygments 2.19.2, and mako 1.3.10 -- all below
+    their respective fixed versions -- so this assertion would have failed
+    for each of them.
+    """
+    min_version, advisory, source = spec
+    lock_data = tomllib.loads(_LOCK_FILE.read_text())
+    entries = [pkg for pkg in lock_data["package"] if pkg["name"] == package_name]
+
+    assert entries, f"{package_name} not found in uv.lock; expected it as a transitive dependency via {source}"
+
+    for entry in entries:
+        locked_version = Version(entry["version"])
+        assert locked_version >= min_version, (
+            f"uv.lock pins {package_name} {locked_version}, which is vulnerable to "
+            f"{advisory}; run `uv lock --upgrade-package {package_name}` to update it."
+        )
+
+
+@pytest.mark.parametrize(("package_name", "spec"), sorted(_TRANSITIVE_MIN_VERSIONS.items()))
+def test_installed_transitive_dependency_above_vulnerable_version(
+    package_name: str, spec: tuple[Version, str, str]
+) -> None:
+    """The synced environment must match the lock file's fixed transitive dependency.
+
+    Complements the uv.lock check above by catching an environment that
+    drifted from the lock file (e.g. `.venv` synced before the lock was
+    upgraded).
+    """
+    min_version, advisory, _source = spec
+    try:
+        installed_version = Version(importlib.metadata.version(package_name))
+    except importlib.metadata.PackageNotFoundError:
+        pytest.skip(f"{package_name} not installed")
+
+    assert (
+        installed_version >= min_version
+    ), f"{package_name} {installed_version} is vulnerable to {advisory}; run `uv sync` to match the updated lock file."
+
+
+@pytest.mark.parametrize(("package_name", "spec"), sorted(_TRANSITIVE_MIN_VERSIONS.items()))
+def test_pyproject_constrains_transitive_dependency_above_vulnerable_version(
+    package_name: str, spec: tuple[Version, str, str]
+) -> None:
+    """``pyproject.toml`` must pin a ``[tool.uv]`` constraint excluding each vulnerable range.
+
+    None of these packages are direct dependencies of this project, so there
+    is no ``[project.dependencies]`` floor to raise. Without an explicit
+    ``[tool.uv] constraint-dependencies`` floor, a future relock could
+    silently reintroduce the vulnerable release. Before this fix, no such
+    constraint existed for any of them and this assertion would have failed.
+    """
+    min_version, advisory, _source = spec
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    constraints = pyproject_data.get("tool", {}).get("uv", {}).get("constraint-dependencies", [])
+    matching = [Requirement(dep) for dep in constraints if Requirement(dep).name == package_name]
+
+    assert matching, (
+        f"pyproject.toml has no [tool.uv] constraint-dependencies entry for {package_name}; "
+        f"add one (e.g. '{package_name}>={min_version}') so a relock cannot reintroduce {advisory}"
+    )
+
+    for req in matching:
+        assert req.marker is None, (
+            f"{package_name} constraint {req!r} is gated by an environment marker; "
+            f"a marked constraint leaves the unmatched environments unconstrained, which could "
+            f"reintroduce {advisory} for them"
+        )
+        lower_bounds = [part.version for part in req.specifier if part.operator in (">=", ">", "==", "~=")]
+        assert lower_bounds, f"{package_name} constraint {req!r} has no lower-bound specifier"
+        assert all(Version(bound) >= min_version for bound in lower_bounds), (
+            f"pyproject.toml's {package_name} constraint is {req!r}, which still permits versions "
+            f"vulnerable to {advisory}"
+        )
+
+
+_PYTEST_MIN_VERSION = Version("9.0.3")
+"""Versions below this are vulnerable to:
+
+- PYSEC-2026-1845: vulnerable tmpdir handling, fixed in 9.0.3.
+
+pytest is a direct dependency in the ``test`` dependency group, so its floor
+in ``pyproject.toml`` is raised directly rather than via a ``[tool.uv]``
+constraint.
+"""
+
+
+def test_uv_lock_pins_pytest_above_vulnerable_versions() -> None:
+    """uv.lock must not pin a pytest affected by PYSEC-2026-1845.
+
+    Before this fix, uv.lock pinned pytest 9.0.2, which is vulnerable; this
+    assertion would have failed against that lock file.
+    """
+    lock_data = tomllib.loads(_LOCK_FILE.read_text())
+    pytest_entries = [pkg for pkg in lock_data["package"] if pkg["name"] == "pytest"]
+
+    assert pytest_entries, "pytest not found in uv.lock"
+
+    for entry in pytest_entries:
+        locked_version = Version(entry["version"])
+        assert locked_version >= _PYTEST_MIN_VERSION, (
+            f"uv.lock pins pytest {locked_version}, which is vulnerable to "
+            "PYSEC-2026-1845; run `uv lock --upgrade-package pytest` to update it."
+        )
+
+
+def test_installed_pytest_above_vulnerable_versions() -> None:
+    """The running pytest must match the lock file's fixed version.
+
+    Complements the uv.lock check above by catching an environment that
+    drifted from the lock file (e.g. `.venv` synced before the lock was
+    upgraded).
+    """
+    installed_version = Version(importlib.metadata.version("pytest"))
+    assert (
+        installed_version >= _PYTEST_MIN_VERSION
+    ), f"pytest {installed_version} is vulnerable to PYSEC-2026-1845; run `uv sync` to match the updated lock file."
+
+
+def test_pyproject_pytest_floor_excludes_vulnerable_versions() -> None:
+    """``pyproject.toml``'s ``pytest`` floor in the ``test`` group must exclude the vulnerable range.
+
+    Before this fix, the floor was ``pytest>=8.0.0``, which lets a downstream
+    resolver land on the vulnerable 9.0.2 release. This assertion would have
+    failed against that floor.
+    """
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    test_group = pyproject_data["dependency-groups"]["test"]
+    requirements = [Requirement(dep) for dep in test_group if isinstance(dep, str)]
+    pytest_req = next((req for req in requirements if req.name == "pytest"), None)
+
+    assert pytest_req is not None, "pytest not found in [dependency-groups.test]"
+
+    lower_bounds = [spec.version for spec in pytest_req.specifier if spec.operator in (">=", ">", "==", "~=")]
+    assert lower_bounds, f"pytest requirement {pytest_req!r} has no lower-bound specifier"
+    assert all(Version(bound) >= _PYTEST_MIN_VERSION for bound in lower_bounds), (
+        f"pyproject.toml's pytest requirement is {pytest_req!r}, which still permits versions "
+        "vulnerable to PYSEC-2026-1845"
+    )
+
+
+def test_pyproject_constrains_multipart_above_vulnerable_version() -> None:
+    """``pyproject.toml`` must pin a ``[tool.uv]`` constraint excluding the
+    vulnerable multipart range.
+
+    multipart is not a direct dependency of this project, so there is no
+    ``[project.dependencies]`` floor to raise. Since litestar's own
+    dependency bound (``multipart>=1.2.0``) does not exclude the vulnerable
+    1.3.0 release, this project must pin an explicit ``[tool.uv]
+    constraint-dependencies`` floor instead, or a future relock could
+    silently reintroduce PYSEC-2026-2670. Before this fix, no such
+    constraint existed and this assertion would have failed.
+    """
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    constraints = pyproject_data.get("tool", {}).get("uv", {}).get("constraint-dependencies", [])
+    multipart_constraints = [Requirement(dep) for dep in constraints if Requirement(dep).name == "multipart"]
+
+    assert multipart_constraints, (
+        "pyproject.toml has no [tool.uv] constraint-dependencies entry for multipart; "
+        "add one (e.g. 'multipart>=1.3.1') so a relock cannot reintroduce PYSEC-2026-2670"
+    )
+
+    for multipart_req in multipart_constraints:
+        assert multipart_req.marker is None, (
+            f"multipart constraint {multipart_req!r} is gated by an environment marker; "
+            "a marked constraint leaves the unmatched environments unconstrained, which could "
+            "reintroduce PYSEC-2026-2670 for them"
+        )
+        lower_bounds = [spec.version for spec in multipart_req.specifier if spec.operator in (">=", ">", "==", "~=")]
+        assert lower_bounds, f"multipart constraint {multipart_req!r} has no lower-bound specifier"
+        assert all(Version(bound) >= _MULTIPART_MIN_VERSION for bound in lower_bounds), (
+            f"pyproject.toml's multipart constraint is {multipart_req!r}, which still permits "
+            "versions vulnerable to PYSEC-2026-2670"
+        )

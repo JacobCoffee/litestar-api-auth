@@ -162,11 +162,15 @@ class TestThirdPartyCodeJobsCannotDeploy:
     Sphinx -- inherited both, even though only the separate ``deploy`` job uses
     them. This assertion would have failed against that version of the file.
 
-    Single-job workflows (e.g. ``publish.yml``, which needs ``id-token: write``
-    in the same job that runs ``uv build`` for PyPI Trusted Publishing) are out
-    of scope here: there is no *other* job for the permission to leak into, so
-    this isn't the "workflow-level default overshares" class of bug -- splitting
-    that into build/publish jobs is a separate, larger change.
+    ``publish.yml`` used to be a single job that ran ``uv build`` in the same
+    job that held ``id-token: write`` for PyPI Trusted Publishing -- a
+    compromised build-toolchain release pulled in during ``uv build`` would
+    have run with access to the OIDC token. It has since been split into a
+    ``build`` job (no deploy permissions) and a ``publish-release`` job that
+    only downloads the already-built artifact, so this generic check now
+    covers it like any other multi-job workflow; see
+    ``test_workflow_build_publish_split.py`` for a fix-specific regression
+    test.
     """
 
     @pytest.mark.unit
