@@ -84,6 +84,36 @@ class TestRedisBackendCreate:
         with pytest.raises(ValueError, match="already exists"):
             await redis_backend.create(hashed_key, duplicate_info)
 
+    async def test_create_duplicate_hash_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
+        """Duplicate-hash error must not embed the stored key_hash verifier.
+
+        The hash is the exact value backends use for lookups; leaking it in
+        an exception message (surfaced via debug-mode responses or logs)
+        would expose the stored credential unnecessarily.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await redis_backend.create(hashed_key, key_info)
+
+        duplicate_info = APIKeyInfo(
+            key_id="test-456",
+            key_hash=hashed_key,
+            name="Duplicate Key",
+            scopes=["write"],
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await redis_backend.create(hashed_key, duplicate_info)
+
+        assert hashed_key not in str(exc_info.value)
+        assert str(exc_info.value) == "API key with this hash already exists"
+
     async def test_create_duplicate_id(self, redis_backend: RedisBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
         _, hashed_key1 = generate_api_key("test_")

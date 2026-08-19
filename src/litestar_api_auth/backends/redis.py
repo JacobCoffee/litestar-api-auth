@@ -222,7 +222,10 @@ class RedisBackend:
                 await pipeline.watch(redis_key, id_key)
                 hash_exists = await self._client.exists(redis_key)
                 if hash_exists:
-                    msg = f"API key with hash {key_hash} already exists"
+                    # Do not interpolate key_hash into the message: it's the exact
+                    # stored verifier used for backend lookups, and this
+                    # exception can surface in debug-mode responses and logs.
+                    msg = "API key with this hash already exists"
                     raise ValueError(msg)
 
                 id_exists = await self._client.exists(id_key)
