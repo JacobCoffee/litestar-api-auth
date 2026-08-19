@@ -11,7 +11,7 @@ UV     ?= uv $(UV_OPTS)
 .EXPORT_ALL_VARIABLES:
 
 .PHONY: help install dev clean lint fmt test docs
-.PHONY: fmt-fix fmt-check type-check ruff ruff-check security
+.PHONY: fmt-fix fmt-check type-check ruff ruff-check security audit
 .PHONY: docs-serve docs-clean
 .PHONY: install-uv install-prek upgrade lock
 .PHONY: wt worktree wt-ls worktree-list wt-j worktree-jump worktree-prune
@@ -98,6 +98,12 @@ type-check: ## Run ty type checker
 security: ## Run zizmor GitHub Actions security scanner
 	@echo "=> Running zizmor security scan on GitHub Actions workflows"
 	@uvx zizmor .github/workflows/
+
+audit: ## Run pip-audit against the locked dependencies
+	@echo "=> Auditing locked dependencies for known vulnerabilities"
+	@$(UV) export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt > /dev/null
+	@uvx pip-audit -r requirements-audit.txt --desc
+	@rm -f requirements-audit.txt
 
 # =============================================================================
 # Testing

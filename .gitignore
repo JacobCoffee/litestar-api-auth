@@ -55,6 +55,7 @@ coverage.xml
 *.log
 .tox/
 .nox/
+requirements-audit.txt
 
 # ==================================================================================== #
 # TYPE CHECKING & LINTING

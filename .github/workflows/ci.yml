@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   # ==================================================================================== #
-  # SECURITY SCAN (workflow security with zizmor)
+  # SECURITY SCAN (workflow security with zizmor, dependency audit with pip-audit)
   # ==================================================================================== #
   security:
     name: Security Scan
@@ -42,6 +42,19 @@ jobs:
         uses: zizmorcore/zizmor-action@135698455da5c3b3e55f73f4419e481ab68cdd95 # v0.4.1
         with:
           inputs: .github/workflows/
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
+        with:
+          enable-cache: true
+
+      - name: Export locked dependencies
+        run: uv export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt
+
+      - name: Run pip-audit
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements-audit.txt
 
   # ==================================================================================== #
   # VALIDATE (lint, format, type-check in one job)
