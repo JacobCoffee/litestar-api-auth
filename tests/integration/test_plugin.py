@@ -459,6 +459,86 @@ class TestManagementRouteAuthorization:
         assert response.status_code == expected_status
 
 
+class TestRevokeReturnValueIsRespected:
+    """Regression test: the revoke endpoint must not ignore a failed revoke().
+
+    ``backend.create()`` now refuses to store a record whose ``info.key_hash``
+    disagrees with the ``key_hash`` argument (see ``TestMemoryBackendCreate``
+    in ``tests/test_backends.py``), which is what used to let such a record
+    into storage in the first place. But a record can still end up with a
+    ``key_hash`` that doesn't resolve to anything in the primary store --
+    e.g. data restored from an older version of this library, or a store
+    edited directly outside the API -- and previously
+    ``APIKeyController.revoke_api_key`` ignored ``backend.revoke()``'s
+    ``False`` return in that case, responding 204 as if the key had been
+    revoked when it hadn't been touched at all.
+    """
+
+    @pytest.mark.integration
+    async def test_revoke_route_returns_404_when_backend_cannot_revoke(
+        self,
+        seeded_backend: MemoryBackend,
+        test_api_key: tuple[str, str, APIKeyInfo],
+    ) -> None:
+        """Revoking a key whose key_hash doesn't resolve must 404, not 204."""
+        _raw_key, hashed_key, _key_info = test_api_key
+
+        # Simulate a record that has drifted out of sync with the primary
+        # store -- the state create()'s new validation now prevents, but
+        # which can still arise from data restored from an older version of
+        # this library or a store edited outside the API. get_by_id() must
+        # keep returning it (it's still "the record for this key_id"), but
+        # its key_hash no longer resolves to anything revoke()/delete() can find.
+        seeded_backend._store[hashed_key] = APIKeyInfo(
+            key_id="test-key-123",
+            key_hash="stale-hash-that-does-not-exist-in-store",
+            name="Test Key",
+            scopes=["read:users", "write:posts"],
+            is_active=True,
+        )
+
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await seeded_backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-revoke-integrity",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api-keys/test-key-123/revoke",
+                headers={"X-API-Key": raw_admin_key},
+            )
+
+            assert response.status_code == 404
+
+            # The record itself must be untouched -- still active, i.e.
+            # genuinely not revoked, rather than silently reported as
+            # revoked. Checked inside the `with` block: TestClient's
+            # __exit__ fires the plugin's on_shutdown hook, which calls
+            # backend.close() and clears the in-memory store.
+            untouched = await seeded_backend.get(hashed_key)
+            assert untouched is not None
+            assert untouched.is_active is True
+
+
 class TestMiddlewareIntegration:
     """Test middleware integration with protected routes."""
 
