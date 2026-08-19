@@ -733,3 +733,38 @@ class TestMemoryBackendIntegration:
         # Verify all created
         keys = await memory_backend.list()
         assert len(keys) == 10
+
+
+class TestAPIKeyInfoHasScopes:
+    """Tests for ``APIKeyInfo.has_scopes`` (backends.base), covering requirement validation."""
+
+    def _key_info(self) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="test-123",
+            key_hash="hash",
+            name="Test Key",
+            scopes=["read:users"],
+        )
+
+    def test_has_scopes_all_requirement(self) -> None:
+        """'all' still requires every scope to be present."""
+        key_info = self._key_info()
+        assert key_info.has_scopes(["read:users"], requirement="all") is True
+        assert key_info.has_scopes(["read:users", "write:users"], requirement="all") is False
+
+    def test_has_scopes_any_requirement(self) -> None:
+        """'any' still requires at least one scope to be present."""
+        key_info = self._key_info()
+        assert key_info.has_scopes(["read:users", "write:users"], requirement="any") is True
+        assert key_info.has_scopes(["write:users"], requirement="any") is False
+
+    def test_has_scopes_invalid_requirement_raises(self) -> None:
+        """An unrecognized requirement must raise instead of silently degrading to 'any'.
+
+        Regression test: previously a misspelled requirement value (e.g. a typo
+        of "all") fell through to the "any" branch, so a key holding only one of
+        several required scopes was granted access under an intended all-of check.
+        """
+        key_info = self._key_info()
+        with pytest.raises(ValueError, match="Invalid requirement"):
+            key_info.has_scopes(["read:users", "write:users"], requirement="bogus")

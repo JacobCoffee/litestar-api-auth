@@ -228,6 +228,16 @@ class TestAPIKeyInfo:
         result = base_key_info.has_scopes(["read:users", "write:posts"])
         assert result is True
 
+    def test_has_scopes_invalid_requirement_raises(self, base_key_info: APIKeyInfo) -> None:
+        """An unrecognized requirement must raise instead of silently degrading to 'any'.
+
+        Regression test: previously a misspelled requirement value (e.g. a typo
+        of "all") fell through to the "any" branch, so a key holding only one of
+        several required scopes was granted access under an intended all-of check.
+        """
+        with pytest.raises(ValueError, match="Invalid requirement"):
+            base_key_info.has_scopes(["read:users", "admin:delete"], requirement="bogus")  # type: ignore[arg-type]
+
         result = base_key_info.has_scopes(["read:users", "admin:delete"])
         assert result is False
 

@@ -77,10 +77,16 @@ class APIKeyInfo(msgspec.Struct):
 
         Returns:
             True if the scope requirement is satisfied, False otherwise.
+
+        Raises:
+            ValueError: If requirement is not "all" or "any".
         """
         if requirement == "all":
             return all(s in self.scopes for s in scopes)
-        return any(s in self.scopes for s in scopes)
+        if requirement == "any":
+            return any(s in self.scopes for s in scopes)
+        msg = f"Invalid requirement: {requirement!r}. Must be 'all' or 'any'"
+        raise ValueError(msg)
 
 
 @runtime_checkable

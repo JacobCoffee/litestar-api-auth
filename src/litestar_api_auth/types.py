@@ -163,6 +163,9 @@ class APIKeyInfo(msgspec.Struct, frozen=True):
         Returns:
             True if the scope requirement is satisfied.
 
+        Raises:
+            ValueError: If requirement is not "all" or "any".
+
         Example:
             >>> key_info.has_scopes(["read:users", "write:users"], requirement="all")
             False
@@ -171,5 +174,7 @@ class APIKeyInfo(msgspec.Struct, frozen=True):
         """
         if requirement == "all":
             return all(scope in self.scopes for scope in required_scopes)
-        # requirement == "any"
-        return any(scope in self.scopes for scope in required_scopes)
+        if requirement == "any":
+            return any(scope in self.scopes for scope in required_scopes)
+        msg = f"Invalid requirement: {requirement!r}. Must be 'all' or 'any'"
+        raise ValueError(msg)
