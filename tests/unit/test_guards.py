@@ -10,10 +10,31 @@ and to anyone reading the annotation to decide what is safe to serialize.
 from __future__ import annotations
 
 import typing
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+from litestar.connection import ASGIConnection
+from litestar.exceptions import NotAuthorizedException, PermissionDeniedException
 
 from litestar_api_auth import guards
 from litestar_api_auth.backends.base import APIKeyInfo as BackendAPIKeyInfo
+from litestar_api_auth.guards import get_api_key_info, require_api_key, require_scope
 from litestar_api_auth.types import APIKeyInfo as PublicAPIKeyInfo
+
+
+def _connection_with_state_api_key(value: object) -> ASGIConnection:
+    """Build an ASGIConnection whose ``state["api_key"]`` is exactly `value`.
+
+    Mirrors ``_make_scope`` in ``test_middleware.py``: this simulates a value
+    landing in the generic, unnamespaced "api_key" state key from *some*
+    source other than ``APIKeyMiddleware`` validating a key on this request
+    (another middleware/dependency/handler, or a route excluded from
+    ``APIKeyMiddleware`` entirely), which is exactly what
+    ``get_api_key_info`` must not blindly trust.
+    """
+    scope: dict[str, Any] = {"type": "http", "headers": [], "state": {"api_key": value}}
+    return ASGIConnection(scope)  # type: ignore[arg-type]
 
 
 class TestGetApiKeyInfoAnnotation:
@@ -42,3 +63,88 @@ class TestGetApiKeyInfoAnnotation:
         """
         hints = typing.get_type_hints(guards.get_api_key_info)
         assert hints["return"] is BackendAPIKeyInfo
+
+
+class TestStateTrustBoundary:
+    """Regression tests: guards must not trust a merely-truthy, non-None
+    ``state["api_key"]`` as proof of authentication.
+
+    ``state["api_key"]`` is a generic, unnamespaced key. Before this fix,
+    ``get_api_key_info`` only checked ``is None``, so any other in-process
+    code that wrote a truthy value there -- a forged/stale/wrong-type
+    object, including one planted on a route matched by
+    ``APIKeyMiddleware``'s ``exclude_paths`` where the middleware's own
+    clear-on-entry never runs -- would satisfy ``require_api_key``, and
+    ``require_scope``/``require_scopes`` would trust whatever ``scopes`` it
+    claimed to have, even if the forged object were inactive and expired.
+    """
+
+    def test_non_apikeyinfo_truthy_value_fails_require_api_key(self) -> None:
+        """A non-``APIKeyInfo`` truthy value (e.g. plain int) must not pass.
+
+        Before the fix, ``get_api_key_info`` only checked ``is None``, so
+        ``state["api_key"] = 0`` -- not None -- was returned as-is and
+        ``require_api_key`` passed.
+        """
+        connection = _connection_with_state_api_key(0)
+
+        with pytest.raises(NotAuthorizedException):
+            get_api_key_info(connection)
+
+        with pytest.raises(NotAuthorizedException):
+            require_api_key(connection, None)  # type: ignore[arg-type]
+
+    def test_forged_inactive_expired_key_fails_require_scope(self) -> None:
+        """A forged ``APIKeyInfo`` that is revoked *and* expired must not
+        satisfy ``require_scope``, even though it claims the right scope.
+
+        Before the fix, ``get_api_key_info`` returned any non-None value
+        unconditionally, so ``require_scope`` only checked
+        ``key_info.has_scope(...)`` against attacker-controlled data and
+        never re-validated ``is_active``/``is_expired``.
+        """
+        forged = BackendAPIKeyInfo(
+            key_id="forged",
+            key_hash="",
+            name="Forged Admin Key",
+            scopes=["admin"],
+            is_active=False,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        connection = _connection_with_state_api_key(forged)
+
+        with pytest.raises(NotAuthorizedException):
+            require_scope("admin")(connection, None)  # type: ignore[arg-type]
+
+    def test_forged_active_but_expired_key_fails(self) -> None:
+        """An expired key that is still marked active must still be rejected."""
+        forged = BackendAPIKeyInfo(
+            key_id="forged-expired",
+            key_hash="",
+            name="Forged Expired Key",
+            scopes=["admin"],
+            is_active=True,
+            expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        connection = _connection_with_state_api_key(forged)
+
+        with pytest.raises(NotAuthorizedException):
+            require_api_key(connection, None)  # type: ignore[arg-type]
+
+    def test_valid_key_still_passes(self) -> None:
+        """Sanity check: a genuine, active, non-expired key is unaffected."""
+        valid = BackendAPIKeyInfo(
+            key_id="real",
+            key_hash="",
+            name="Real Key",
+            scopes=["admin"],
+            is_active=True,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        connection = _connection_with_state_api_key(valid)
+
+        require_api_key(connection, None)  # type: ignore[arg-type]  # must not raise
+        require_scope("admin")(connection, None)  # type: ignore[arg-type]  # must not raise
+
+        with pytest.raises(PermissionDeniedException):
+            require_scope("billing")(connection, None)  # type: ignore[arg-type]

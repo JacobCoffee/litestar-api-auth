@@ -10,9 +10,10 @@ import hashlib
 
 import pytest
 from litestar import Litestar, get
+from litestar.config.app import AppConfig
 from litestar.testing import TestClient
 
-from litestar_api_auth import APIAuthConfig, APIAuthPlugin, require_api_key
+from litestar_api_auth import APIAuthConfig, APIAuthPlugin, ConfigurationError, require_api_key
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.memory import MemoryBackend
 from litestar_api_auth.guards import require_scope, require_scopes
@@ -969,3 +970,83 @@ class TestHashImplementationReuse:
             # The middleware must hash the same way to look the key back up.
             response = client.get("/protected", headers={"X-API-Key": new_raw_key})
             assert response.status_code == 200
+
+
+class TestMultipleInstancesRejected:
+    """Regression test: stacking APIAuthPlugin instances must not silently
+    cross-wire realms.
+
+    Both middlewares would write to the same ``request.state["api_key"]``
+    slot and guards only check scope strings, never which backend validated
+    the key -- so a key minted by one realm's backend (e.g. "partner")
+    satisfies guards meant for another realm (e.g. "internal") as long as it
+    carries the same scope string. On top of that, ``_register_routes``
+    unconditionally overwrites the ``"backend"`` dependency, so the
+    first-registered realm's auto-registered management controller ends up
+    operating on the second realm's backend. Before the fix there was no
+    guard against this at all, so a second ``APIAuthPlugin`` instance was
+    accepted silently instead of raising.
+    """
+
+    def test_second_plugin_instance_raises_configuration_error(self) -> None:
+        """A second APIAuthPlugin on one app (with auto-routes on, like the
+        real management-controller cross-wiring scenario) must raise, not
+        cross-wire realms."""
+        internal_backend = MemoryBackend()
+        partner_backend = MemoryBackend()
+
+        with pytest.raises(ConfigurationError, match="Multiple APIAuthPlugin"):
+            Litestar(
+                route_handlers=[],
+                plugins=[
+                    APIAuthPlugin(config=APIAuthConfig(backend=internal_backend, auto_routes=True)),
+                    APIAuthPlugin(config=APIAuthConfig(backend=partner_backend, auto_routes=True)),
+                ],
+            )
+
+    def test_second_instance_raises_before_mutating_app_config(self) -> None:
+        """The check must fire before the second instance touches
+        dependencies, routes, or middleware -- so the first instance's
+        wiring (in particular the "backend" dependency its management
+        controller relies on) is never overwritten, not even transiently."""
+        internal_backend = MemoryBackend()
+        partner_backend = MemoryBackend()
+        first = APIAuthPlugin(config=APIAuthConfig(backend=internal_backend, auto_routes=True))
+        second = APIAuthPlugin(config=APIAuthConfig(backend=partner_backend, auto_routes=True))
+
+        app_config = AppConfig(route_handlers=[])
+        app_config = first.on_app_init(app_config)
+
+        dependencies_before = dict(app_config.dependencies or {})
+        route_handlers_before = list(app_config.route_handlers or [])
+        middleware_before = list(app_config.middleware or [])
+
+        with pytest.raises(ConfigurationError, match="Multiple APIAuthPlugin"):
+            second.on_app_init(app_config)
+
+        assert app_config.dependencies == dependencies_before
+        assert app_config.route_handlers == route_handlers_before
+        assert app_config.middleware == middleware_before
+
+    def test_subclass_overriding_backend_dependency_key_is_still_rejected(self) -> None:
+        """The single-instance check must not be a per-instance attribute a
+        subclass can dodge by renaming ``_backend_dependency_key`` -- that
+        subclass would still share the same ``request.state["api_key"]``
+        slot and still be vulnerable to the cross-realm scope confusion."""
+
+        class RenamedDependencyKeyPlugin(APIAuthPlugin):
+            def __init__(self, config: APIAuthConfig) -> None:
+                super().__init__(config)
+                self._backend_dependency_key = "partner_api_auth_backend"
+
+        internal_backend = MemoryBackend()
+        partner_backend = MemoryBackend()
+
+        with pytest.raises(ConfigurationError, match="Multiple APIAuthPlugin"):
+            Litestar(
+                route_handlers=[],
+                plugins=[
+                    APIAuthPlugin(config=APIAuthConfig(backend=internal_backend, auto_routes=False)),
+                    RenamedDependencyKeyPlugin(config=APIAuthConfig(backend=partner_backend, auto_routes=False)),
+                ],
+            )

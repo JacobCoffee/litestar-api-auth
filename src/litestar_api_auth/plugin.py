@@ -124,6 +124,14 @@ class APIAuthPlugin(InitPluginProtocol):
 
     __slots__ = ("_backend_dependency_key", "config")
 
+    # Fixed sentinel stored in ``app_config.opt`` (never ``None``, unlike
+    # ``app_config.dependencies``) to detect a second instance. This is a
+    # class attribute -- not derived from ``self._backend_dependency_key`` or
+    # any other per-instance state -- so a subclass cannot bypass the check
+    # by overriding an instance attribute; every ``APIAuthPlugin`` (and every
+    # subclass that doesn't shadow this name) shares it.
+    _SINGLE_INSTANCE_MARKER = "litestar_api_auth.plugin_registered"
+
     def __init__(self, config: APIAuthConfig) -> None:
         """Initialize the API auth plugin.
 
@@ -148,7 +156,15 @@ class APIAuthPlugin(InitPluginProtocol):
 
         Returns:
             The modified application configuration.
+
+        Raises:
+            ConfigurationError: If another ``APIAuthPlugin`` is already
+                registered on this app. See ``_check_single_instance`` for why
+                running more than one instance per app is not supported.
         """
+        # Refuse to silently cross-wire a second realm's auth into the first.
+        self._check_single_instance(app_config)
+
         # Register backend as a dependency
         self._register_dependencies(app_config)
 
@@ -171,6 +187,51 @@ class APIAuthPlugin(InitPluginProtocol):
             self._configure_openapi(app_config)
 
         return app_config
+
+    def _check_single_instance(self, app_config: AppConfig) -> None:
+        """Refuse to configure an app that already has an ``APIAuthPlugin``.
+
+        Every instance writes to the same global slots regardless of which
+        backend it wraps: ``request.state["api_key"]`` (see
+        ``APIKeyMiddleware``), the ``self._backend_dependency_key`` dependency,
+        and the ``"backend"`` dependency used by auto-registered management
+        routes. A second instance wouldn't add a second, independent realm --
+        it would silently overwrite those slots with its own backend, so a
+        key minted by realm A can satisfy guards meant for realm B, and
+        realm A's management controller ends up wired to realm B's backend.
+        Multi-realm auth therefore isn't supported by stacking plugin
+        instances; raise instead of allowing that cross-wiring to happen
+        quietly.
+
+        Detection uses a fixed marker in ``app_config.opt`` rather than
+        anything keyed off ``self`` (e.g. ``self._backend_dependency_key``,
+        or the presence of an ``"api_auth_backend"`` dependency): a per-
+        instance attribute could be overridden by a subclass to dodge
+        detection while still sharing the same vulnerable request-state
+        slot, and an unrelated app that happens to define its own
+        ``"api_auth_backend"`` dependency would otherwise be misreported as
+        a second plugin instance.
+
+        Args:
+            app_config: The application configuration being built.
+
+        Raises:
+            ConfigurationError: If ``_SINGLE_INSTANCE_MARKER`` is already set
+                in ``app_config.opt``, meaning another ``APIAuthPlugin``
+                instance already ran ``on_app_init`` for this same app.
+        """
+        from litestar_api_auth.exceptions import ConfigurationError
+
+        if app_config.opt.get(self._SINGLE_INSTANCE_MARKER):
+            raise ConfigurationError(
+                "Multiple APIAuthPlugin instances were registered on the same "
+                "Litestar app. Each instance shares the same "
+                "request.state['api_key'] slot and dependency keys, so a "
+                "second instance would silently authenticate requests "
+                "against the wrong backend instead of adding an independent "
+                "realm. Use a single APIAuthPlugin (with one backend) per app."
+            )
+        app_config.opt[self._SINGLE_INSTANCE_MARKER] = True
 
     def _register_dependencies(self, app_config: AppConfig) -> None:
         """Register the backend as a dependency for injection.
