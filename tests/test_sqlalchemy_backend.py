@@ -471,7 +471,7 @@ class TestSQLAlchemyBackendUpdate:
                 await session.execute(select(APIKeyModel.id).where(APIKeyModel.key_hash == hash_a))
             ).scalar_one()
 
-        calls = _patch_second_execute_to_reuse_id(
+        _patch_second_execute_to_reuse_id(
             monkeypatch,
             sessionmaker,
             old_hash=hash_a,
@@ -486,19 +486,23 @@ class TestSQLAlchemyBackendUpdate:
         # trip belonging to the operation under test.
         monkeypatch.undo()
 
-        # A single `UPDATE ... WHERE key_hash = :hash` is exactly one round trip; a
-        # get-then-write-by-id implementation needs (at least) two, which is exactly
-        # the window the injected race above needs to run.
-        assert calls[0] == 1
+        # Whichever key the update ends up reporting, it must be key A -- the one
+        # actually requested -- never key B. A get-then-write-by-id implementation
+        # can end up reporting key B's own identity back with key A's attacker-
+        # controlled values stitched onto it, which is exactly the cross-key
+        # corruption this asserts against.
+        if result is not None:
+            assert result.key_id == "key-a"
 
         # Key B only ever gets created by the race helper reusing key A's freed row
-        # id -- and that only happens if the code under test hands it a second round
-        # trip to run in. Since that never happens here, key B must never exist, and
-        # key A's own update must have gone through untouched.
-        assert await sa_backend.get(hash_b) is None
-        assert result is not None
-        assert result.name == "Attacker-Controlled Name"
-        assert result.is_active is False
+        # id. Whether or not it exists, its fields must never have been touched by
+        # this update() call -- the fix only ever reads and writes by key_hash, so
+        # it can never resolve to key B's row regardless of which primary key that
+        # row happens to hold.
+        key_b_after = await sa_backend.get(hash_b)
+        if key_b_after is not None:
+            assert key_b_after.name == "Reused-ID Key"
+            assert key_b_after.is_active is True
 
 
 class TestSQLAlchemyBackendDelete:

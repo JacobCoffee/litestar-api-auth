@@ -373,26 +373,32 @@ class SQLAlchemyBackend:
                 update_data["metadata_"] = value
             else:
                 update_data[field] = value
+        # Never let a caller reassign the surrogate primary key through this
+        # generic field-update API -- key_hash is the only column that identifies
+        # which row gets written below.
+        update_data.pop("id", None)
 
         if not update_data:
             return await self.get(key_hash)
 
         async with self._sessionmaker() as session:
-            # A single UPDATE ... WHERE key_hash = :key_hash (with RETURNING) keeps
-            # the match and the write on the same predicate. A get-then-act-by-id
-            # split here would be vulnerable to an ABA race: another key's row could
-            # be deleted and replaced by a row that reuses the same primary key
+            # A single UPDATE ... WHERE key_hash = :key_hash keeps the write scoped
+            # to the row identified by key_hash. A get-then-write-by-id split here
+            # would be vulnerable to an ABA race: another key's row could be
+            # deleted and replaced by a row that reuses the same primary key
             # (SQLite reuses rowids without AUTOINCREMENT) between the read and the
             # write, silently mutating the replacement key instead of this one.
-            stmt = (
-                sa_update(self._model)
-                .where(self._model.key_hash == key_hash)
-                .values(**update_data)
-                .returning(self._model)
-            )
-            result = await session.execute(stmt)
-            model = result.scalar_one_or_none()
+            #
+            # `RETURNING` is deliberately not used here: MySQL supports it for
+            # neither UPDATE nor DELETE, and this backend targets PostgreSQL,
+            # MySQL, and SQLite alike. The row is re-read by that same key_hash
+            # (never by id) inside the same transaction instead, so this second
+            # round trip can only ever resolve to the row the UPDATE above just
+            # wrote, never to an unrelated row.
+            await session.execute(sa_update(self._model).where(self._model.key_hash == key_hash).values(**update_data))
+            model = await session.scalar(select(self._model).where(self._model.key_hash == key_hash))
             if model is None:
+                await session.rollback()
                 return None
             await session.commit()
             return _model_to_info(model)
@@ -412,14 +418,15 @@ class SQLAlchemyBackend:
         from sqlalchemy import delete as sa_delete
 
         async with self._sessionmaker() as session:
-            # A single DELETE ... WHERE key_hash = :key_hash (with RETURNING) keeps
-            # the match and the write on the same predicate -- see the comment in
-            # update() for why a get-then-act-by-id split is unsafe here.
-            stmt = sa_delete(self._model).where(self._model.key_hash == key_hash).returning(self._model.id)
-            result = await session.execute(stmt)
-            deleted = result.scalar_one_or_none() is not None
+            # A single DELETE ... WHERE key_hash = :key_hash keeps the write scoped
+            # to the row identified by key_hash -- see the comment in update() for
+            # why a get-then-delete-by-id split is unsafe here, and why `RETURNING`
+            # is avoided. `rowcount` is enough to know whether a row matched: unlike
+            # an UPDATE whose new values might equal the old ones, a DELETE always
+            # reports the row it removed.
+            result = await session.execute(sa_delete(self._model).where(self._model.key_hash == key_hash))
             await session.commit()
-            return deleted
+            return result.rowcount > 0
 
     async def list(
         self,
