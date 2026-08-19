@@ -48,15 +48,27 @@ class APIKeyController(Controller):
 
     Example:
         >>> from litestar import Litestar
+        >>> from litestar.di import Provide
+        >>> from litestar_api_auth import APIAuthConfig, APIAuthPlugin
         >>> from litestar_api_auth.controllers import APIKeyController
         >>> from litestar_api_auth.backends.memory import MemoryBackend
+        >>>
+        >>> backend = MemoryBackend()
         >>>
         >>> class MyController(APIKeyController):
         ...     path = "/api-keys"
         >>>
+        >>> # APIAuthPlugin still needs to be installed even when the
+        >>> # controller is registered manually (auto_routes=False) -- it is
+        >>> # what wires up APIKeyMiddleware, which is what actually
+        >>> # authenticates the caller that ``guards`` above checks. The
+        >>> # plugin's own dependency injection targets its auto-registered
+        >>> # controller, so a manually-registered one still needs its
+        >>> # ``backend`` parameter supplied explicitly, as below.
         >>> app = Litestar(
         ...     route_handlers=[MyController],
-        ...     dependencies={"backend": lambda: MemoryBackend()},
+        ...     dependencies={"backend": Provide(lambda: backend, sync_to_thread=False)},
+        ...     plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend, auto_routes=False))],
         ... )
     """
 

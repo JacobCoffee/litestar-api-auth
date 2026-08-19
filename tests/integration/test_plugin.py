@@ -267,6 +267,197 @@ class TestManagementRouteAuthorization:
 
         assert response.status_code == 401
 
+    @pytest.mark.integration
+    async def test_manually_registered_controller_allows_admin_scoped_key(self, backend: MemoryBackend) -> None:
+        """The manually-registered controller must also *authorize* an admin-scoped
+        key, not just reject anonymous callers -- confirming the class docstring's
+        example (plugin installed with ``auto_routes=False`` alongside an explicit
+        ``backend`` dependency) actually results in a working, guarded route.
+        """
+        from litestar.di import Provide
+
+        from litestar_api_auth.controllers import APIKeyController
+
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-manual",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[APIKeyController],
+            dependencies={"backend": Provide(lambda: backend, sync_to_thread=False)},
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=False,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/", headers={"X-API-Key": raw_admin_key})
+
+        assert response.status_code == 200
+
+    @pytest.mark.integration
+    async def test_list_keys_route_rejects_low_privilege_key(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
+        """A valid key lacking the admin scope must not be able to enumerate keys."""
+        raw_key, _, _ = test_api_key
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/", headers={"X-API-Key": raw_key})
+
+        assert response.status_code == 403
+
+    @pytest.mark.integration
+    async def test_list_keys_route_allows_admin_scoped_key(self, seeded_backend: MemoryBackend) -> None:
+        """A key holding the default ``api_keys:admin`` scope can enumerate keys."""
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await seeded_backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-list",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/", headers={"X-API-Key": raw_admin_key})
+
+        assert response.status_code == 200
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("method", "path_suffix"),
+        [
+            ("get", "test-key-123"),
+            ("post", "test-key-123/revoke"),
+            ("delete", "test-key-123"),
+        ],
+    )
+    async def test_remaining_management_routes_reject_low_privilege_key(
+        self,
+        seeded_backend: MemoryBackend,
+        test_api_key: tuple[str, str, APIKeyInfo],
+        method: str,
+        path_suffix: str,
+    ) -> None:
+        """A valid key lacking the admin scope must not reach GET/revoke/DELETE either.
+
+        This closes the same gap ``test_create_key_route_rejects_low_privilege_key``
+        closes for creation, but for the remaining four routes: requiring merely
+        *any* valid API key (rather than the ``api_keys:admin`` scope specifically)
+        would still let a low-privilege key read, revoke, or delete *any* key,
+        including ones it didn't create.
+        """
+        raw_key, _, _ = test_api_key
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = getattr(client, method)(f"/api-keys/{path_suffix}", headers={"X-API-Key": raw_key})
+
+        assert response.status_code == 403
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("method", "path_suffix", "expected_status"),
+        [
+            ("get", "test-key-123", 200),
+            ("post", "test-key-123/revoke", 204),
+            ("delete", "test-key-123", 204),
+        ],
+    )
+    async def test_remaining_management_routes_allow_admin_scoped_key(
+        self,
+        seeded_backend: MemoryBackend,
+        method: str,
+        path_suffix: str,
+        expected_status: int,
+    ) -> None:
+        """A key holding the default ``api_keys:admin`` scope can reach GET/revoke/DELETE too.
+
+        Guards against over-restricting the fix: the ``api_keys:admin`` scope
+        requirement must still let a properly-privileged caller manage keys,
+        not merely reject everyone else.
+        """
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await seeded_backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-remaining",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = getattr(client, method)(f"/api-keys/{path_suffix}", headers={"X-API-Key": raw_admin_key})
+
+        assert response.status_code == expected_status
+
 
 class TestMiddlewareIntegration:
     """Test middleware integration with protected routes."""
