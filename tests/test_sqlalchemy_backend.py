@@ -741,8 +741,13 @@ class TestSQLAlchemyBackendCustomTableIsolation:
     async def test_custom_table_get_returns_none_for_default_table_only_hash(self) -> None:
         """Test that a hash which only exists in the default table is not visible via the custom-table backend.
 
-        The buggy statement queried ``FROM api_keys`` regardless of the
-        configured table, so this hash would have been (incorrectly) found.
+        Documents the isolation invariant from the other side: with the custom
+        table empty, the buggy cartesian-product ``FROM api_keys, custom_keys``
+        join against zero ``custom_keys`` rows still (coincidentally) yields no
+        rows, so this case alone does not distinguish the buggy statement from
+        the fixed one. See ``test_custom_table_get_does_not_return_default_table_row``
+        and ``test_custom_table_revoke_does_not_affect_default_table_row`` for the
+        cases that do fail against the pre-fix code.
         """
         engine = create_async_engine(
             "sqlite+aiosqlite://",
