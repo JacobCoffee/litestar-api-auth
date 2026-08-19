@@ -148,23 +148,6 @@ class APIKeyMiddleware(AbstractMiddleware):
         if api_key:
             try:
                 key_info = await self._validate_api_key(api_key)
-                # Store the APIKeyInfo in request state for guards to access.
-                # key_hash is redacted first: it's the SHA-256 verifier used
-                # for backend lookups only, and a route handler that returns
-                # this object directly (see the Warning in
-                # guards.get_api_key_info's docstring) would otherwise
-                # serialize the hash into the HTTP response.
-                scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
-
-                # Update last used timestamp if enabled. Usage tracking is
-                # best-effort: a backend that raises RuntimeError here (e.g.
-                # Redis exhausting its WATCH/MULTI retries under heavy write
-                # contention on this key) must not turn an otherwise valid,
-                # already-authenticated request into a failure.
-                if self.update_last_used:
-                    key_hash = self._hash_api_key(api_key)
-                    with contextlib.suppress(RuntimeError):
-                        await self.backend.update_last_used(key_hash)
             except (
                 APIKeyNotFoundError,
                 APIKeyExpiredError,
@@ -174,6 +157,40 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # state["api_key"] stays None (cleared above) if validation fails
                 # Guards will handle the missing key appropriately
                 pass
+            else:
+                # Store the APIKeyInfo in request state for guards to access.
+                # key_hash is redacted first: it's the SHA-256 verifier used
+                # for backend lookups only, and a route handler that returns
+                # this object directly (see the Warning in
+                # guards.get_api_key_info's docstring) would otherwise
+                # serialize the hash into the HTTP response.
+                scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
+
+                # Update last used timestamp if enabled. This is deliberately
+                # outside the except above: it runs only after state["api_key"]
+                # is already populated, so a race-aware custom backend raising
+                # APIKeyRevokedError/APIKeyExpiredError here (e.g. detecting a
+                # concurrent revocation) must clear that state itself instead
+                # of being caught by the validation except block, which would
+                # otherwise leave the just-revoked/expired key authenticated.
+                if self.update_last_used:
+                    key_hash = self._hash_api_key(api_key)
+                    try:
+                        await self.backend.update_last_used(key_hash)
+                    except RuntimeError:
+                        # Usage tracking is best-effort: a backend that raises
+                        # RuntimeError here (e.g. Redis exhausting its
+                        # WATCH/MULTI retries under heavy write contention on
+                        # this key) must not turn an otherwise valid,
+                        # already-authenticated request into a failure.
+                        pass
+                    except (APIKeyRevokedError, APIKeyExpiredError):
+                        # A race-aware backend can detect concurrent
+                        # revocation/expiry here, after already reporting the
+                        # key as active from _validate_api_key. Clear the
+                        # state so the request is not treated as
+                        # authenticated.
+                        scope["state"]["api_key"] = None
 
         # Continue processing the request
         await self.app(scope, receive, send)

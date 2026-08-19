@@ -66,25 +66,33 @@ class TestGetApiKeyInfoAnnotation:
 
 
 class TestStateTrustBoundary:
-    """Regression tests: guards must not trust a merely-truthy, non-None
+    """Regression tests: guards must not trust a merely non-``None``
     ``state["api_key"]`` as proof of authentication.
 
     ``state["api_key"]`` is a generic, unnamespaced key. Before this fix,
     ``get_api_key_info`` only checked ``is None``, so any other in-process
-    code that wrote a truthy value there -- a forged/stale/wrong-type
+    code that wrote a non-``None`` value there -- a forged/stale/wrong-type
     object, including one planted on a route matched by
     ``APIKeyMiddleware``'s ``exclude_paths`` where the middleware's own
     clear-on-entry never runs -- would satisfy ``require_api_key``, and
     ``require_scope``/``require_scopes`` would trust whatever ``scopes`` it
     claimed to have, even if the forged object were inactive and expired.
+
+    These tests cover the fix's stated threat model: an accidental/buggy
+    state-key collision from other server-side code, which is what the
+    isinstance + is_active + is_expired check defends against. A fully
+    malicious actor with arbitrary in-process code execution could still
+    construct a well-formed, active, non-expired ``APIKeyInfo`` -- but at
+    that point they could equally patch the guard itself, which is outside
+    what any in-process object check can defend against.
     """
 
-    def test_non_apikeyinfo_truthy_value_fails_require_api_key(self) -> None:
-        """A non-``APIKeyInfo`` truthy value (e.g. plain int) must not pass.
+    def test_non_apikeyinfo_non_none_value_fails_require_api_key(self) -> None:
+        """A non-``APIKeyInfo`` value that merely isn't ``None`` must not pass.
 
         Before the fix, ``get_api_key_info`` only checked ``is None``, so
-        ``state["api_key"] = 0`` -- not None -- was returned as-is and
-        ``require_api_key`` passed.
+        ``state["api_key"] = 0`` -- not None, even though ``0`` itself is
+        falsy -- was returned as-is and ``require_api_key`` passed.
         """
         connection = _connection_with_state_api_key(0)
 
