@@ -7,8 +7,12 @@ fix, its steps referenced actions by mutable tag/branch (``@v6``, ``@v7``,
 the repo. A compromised tag or the moving ``release/v1`` branch of any of
 those actions would run arbitrary code inside that privileged job -- able to
 steal the OIDC token or tamper with the built wheel/sdist before it reaches
-PyPI. These tests fail on any workflow step, in any job holding
-``id-token: write``, that isn't pinned to a full 40-character commit SHA.
+PyPI.
+
+This test parameterizes over every workflow file (not just ``publish.yml``),
+so it also guards the repo-wide "pin everything to a full commit SHA"
+convention against regressing in any other workflow, present or future --
+including any workflow that later gains ``id-token: write``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from pathlib import Path
 import pytest
 
 WORKFLOWS_DIR = Path(__file__).parent.parent / ".github" / "workflows"
+WORKFLOW_FILES = sorted(WORKFLOWS_DIR.glob("*.yml"))
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _USES_RE = re.compile(r"^\s*(?:-\s+)?uses:\s*([^\s#]+)")
@@ -29,34 +34,24 @@ def _uses_refs(workflow_text: str) -> list[str]:
     return [match.group(1) for line in workflow_text.splitlines() if (match := _USES_RE.match(line))]
 
 
-class TestPublishWorkflowActionsArePinned:
-    """Regression tests for the PyPI Trusted Publishing job (``id-token: write``)."""
+class TestWorkflowActionsArePinned:
+    """Every ``uses:`` step, in every workflow, must be pinned to a full commit SHA.
 
-    @pytest.fixture
-    def publish_workflow_text(self) -> str:
-        path = WORKFLOWS_DIR / "publish.yml"
-        assert path.exists(), f"Workflow not found: {path}"
-        return path.read_text()
+    Before the fix, ``publish.yml`` referenced ``actions/checkout@v6``,
+    ``actions/setup-python@v6``, ``astral-sh/setup-uv@v7``, and
+    ``pypa/gh-action-pypi-publish@release/v1`` -- all mutable refs; this
+    assertion would have failed against that version of the file.
+    """
 
     @pytest.mark.unit
-    def test_all_actions_are_pinned_to_a_full_commit_sha(self, publish_workflow_text: str) -> None:
-        """Every action used by the release job must be pinned to a 40-char commit SHA.
-
-        Before the fix, ``actions/checkout@v6``, ``actions/setup-python@v6``,
-        ``astral-sh/setup-uv@v7``, and ``pypa/gh-action-pypi-publish@release/v1``
-        were all mutable refs; this assertion would have failed against that
-        version of the file.
-        """
-        refs = _uses_refs(publish_workflow_text)
-        assert refs, "expected at least one 'uses:' step in publish.yml"
+    @pytest.mark.parametrize("workflow_path", WORKFLOW_FILES, ids=lambda p: p.name)
+    def test_all_actions_are_pinned_to_a_full_commit_sha(self, workflow_path: Path) -> None:
+        refs = _uses_refs(workflow_path.read_text())
+        assert refs, f"expected at least one 'uses:' step in {workflow_path.name}"
 
         for ref in refs:
             action, _, pinned = ref.partition("@")
-            assert pinned, f"{action} has no pinned ref at all"
-            assert _FULL_SHA_RE.match(pinned), f"{action} is pinned to {pinned!r}, not a full commit SHA"
-
-    @pytest.mark.unit
-    def test_no_action_uses_a_known_mutable_ref(self, publish_workflow_text: str) -> None:
-        """Guard against regressing back to the specific mutable refs that were vulnerable."""
-        for mutable_ref in ("@v6", "@v7", "@release/v1"):
-            assert mutable_ref not in publish_workflow_text
+            assert pinned, f"{workflow_path.name}: {action} has no pinned ref at all"
+            assert _FULL_SHA_RE.match(
+                pinned
+            ), f"{workflow_path.name}: {action} is pinned to {pinned!r}, not a full commit SHA"
