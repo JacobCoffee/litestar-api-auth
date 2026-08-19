@@ -302,6 +302,11 @@ class APIAuthPlugin(InitPluginProtocol):
         def provide_controller_backend() -> APIKeyBackend:
             return backend
 
+        # Bound to a name (rather than a dict literal in the class body)
+        # to keep ruff's RUF012 quiet, matching the ``path``/``guards``
+        # pattern below.
+        controller_dependencies = {"backend": Provide(provide_controller_backend, sync_to_thread=False)}
+
         # Create a dynamic controller class with the correct path and guards.
         # Key management is a privileged operation (a caller who can create
         # keys can mint arbitrary scopes), so it must be guarded even though
@@ -316,7 +321,7 @@ class APIAuthPlugin(InitPluginProtocol):
         class ConfiguredAPIKeyController(APIKeyController):
             path = self.config.route_prefix  # type: ignore[misc]
             guards = self.config.management_guards  # type: ignore[misc]
-            dependencies = {"backend": Provide(provide_controller_backend, sync_to_thread=False)}  # type: ignore[misc]
+            dependencies = controller_dependencies  # type: ignore[misc]
 
         # Add to route handlers
         if app_config.route_handlers is None:

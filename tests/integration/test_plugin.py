@@ -1075,9 +1075,7 @@ class TestAutoRoutesDoNotClobberAppLevelBackendDependency:
     """
 
     @pytest.mark.integration
-    async def test_unrelated_handler_still_receives_its_own_backend_dependency(
-        self, backend: MemoryBackend
-    ) -> None:
+    async def test_unrelated_handler_still_receives_its_own_backend_dependency(self, backend: MemoryBackend) -> None:
         """A pre-existing app-level "backend" dependency must reach an
         unrelated handler unchanged, even with auto_routes management
         routes registered."""
