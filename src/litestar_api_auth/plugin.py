@@ -307,6 +307,20 @@ class APIAuthPlugin(InitPluginProtocol):
         # pattern below.
         controller_dependencies = {"backend": Provide(provide_controller_backend, sync_to_thread=False)}
 
+        # Advertise the OpenAPI security requirement only on these routes --
+        # the ones this plugin actually guards -- rather than as a document-
+        # wide default in ``_configure_openapi``. A document-wide default
+        # would make every other, unguarded route in the app appear to
+        # require an API key in the generated schema even though guards are
+        # opt-in per handler and the middleware itself is fail-open. Omitted
+        # entirely when there's nothing to advertise: no guards means these
+        # routes aren't actually protected either, and disabling
+        # ``enable_openapi`` means the "APIKeyAuth" scheme is never defined
+        # for this to reference.
+        controller_security = (
+            [{"APIKeyAuth": []}] if self.config.enable_openapi and self.config.management_guards else None
+        )
+
         # Create a dynamic controller class with the correct path and guards.
         # Key management is a privileged operation (a caller who can create
         # keys can mint arbitrary scopes), so it must be guarded even though
@@ -322,6 +336,7 @@ class APIAuthPlugin(InitPluginProtocol):
             path = self.config.route_prefix  # type: ignore[misc]
             guards = self.config.management_guards  # type: ignore[misc]
             dependencies = controller_dependencies  # type: ignore[misc]
+            security = controller_security  # type: ignore[misc]
 
         # Add to route handlers
         if app_config.route_handlers is None:
@@ -387,7 +402,12 @@ class APIAuthPlugin(InitPluginProtocol):
         app_config.on_shutdown = [on_shutdown]  # type: ignore[list-item]
 
     def _configure_openapi(self, app_config: AppConfig) -> None:
-        """Configure OpenAPI security scheme for API key authentication.
+        """Register the ``APIKeyAuth`` OpenAPI security scheme.
+
+        This only defines the scheme in ``components.securitySchemes`` --
+        it does not mark every operation (or the document as a whole) as
+        requiring it. See ``_register_routes`` for where the requirement is
+        actually attached, scoped to the routes this plugin guards.
 
         Args:
             app_config: The application configuration to modify.
@@ -430,8 +450,10 @@ class APIAuthPlugin(InitPluginProtocol):
                 openapi_config.components.security_schemes = {}
             openapi_config.components.security_schemes["APIKeyAuth"] = security_scheme
 
-        # Add security requirement
-        if openapi_config.security is None:
-            openapi_config.security = []
-
-        openapi_config.security.append({"APIKeyAuth": []})
+        # Deliberately not appended as a document-wide default requirement
+        # here (e.g. ``openapi_config.security.append(...)``). Runtime
+        # enforcement is guard opt-in per handler and the middleware itself
+        # is fail-open, so a blanket default would make every unguarded
+        # route in the app look protected in the generated schema. Instead,
+        # ``_register_routes`` attaches this requirement only to the routes
+        # it actually guards (the auto-registered management controller).

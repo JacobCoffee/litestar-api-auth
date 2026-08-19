@@ -1052,6 +1052,92 @@ class TestMultipleInstancesRejected:
             )
 
 
+class TestOpenAPISecurityReflectsActualEnforcement:
+    """Regression tests: the generated OpenAPI schema must not claim every
+    route requires an API key.
+
+    Before the fix, ``_configure_openapi`` appended ``{"APIKeyAuth": []}`` as
+    a document-wide default (``openapi_config.security``). Runtime
+    enforcement is guard opt-in per handler and ``APIKeyMiddleware`` is
+    fail-open, so an unguarded route was still fully public while the schema
+    told reviewers/consumers it required ``X-API-Key`` -- false assurance
+    rather than a direct bypass, but still a misleading security posture.
+    """
+
+    @pytest.mark.integration
+    async def test_unguarded_route_has_no_security_requirement_in_schema(self, backend: MemoryBackend) -> None:
+        """A route with no guards must not appear to require an API key."""
+
+        @get("/public")
+        async def public_route() -> dict:
+            return {"message": "public"}
+
+        app = Litestar(
+            route_handlers=[public_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        schema = app.openapi_schema.to_schema()
+
+        # No document-wide default for an unguarded operation to fall back to.
+        assert schema.get("security") in (None, [])
+        public_op = schema["paths"]["/public"]["get"]
+        assert public_op.get("security") in (None, [])
+
+    @pytest.mark.integration
+    async def test_guarded_management_route_still_declares_security_in_schema(self, backend: MemoryBackend) -> None:
+        """The auto-registered, actually-guarded management routes must still
+        advertise the ``APIKeyAuth`` requirement -- the fix must narrow the
+        claim to guarded routes, not delete it everywhere."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        schema = app.openapi_schema.to_schema()
+
+        create_key_op = schema["paths"]["/api-keys"]["post"]
+        assert create_key_op.get("security") == [{"APIKeyAuth": []}]
+
+    @pytest.mark.integration
+    async def test_management_routes_with_guards_disabled_do_not_declare_security(self, backend: MemoryBackend) -> None:
+        """When ``management_guards=[]`` explicitly disables authorization,
+        the schema must not claim those routes are protected either --
+        otherwise disabling the guard would itself create the same false
+        assurance the fix closes."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                        management_guards=[],
+                    )
+                )
+            ],
+        )
+
+        schema = app.openapi_schema.to_schema()
+
+        create_key_op = schema["paths"]["/api-keys"]["post"]
+        assert create_key_op.get("security") in (None, [])
+
+
 class _UserStorage:
     """Stand-in for an app owner's own unrelated 'backend', e.g. object storage.
 
