@@ -125,6 +125,37 @@ class TestMemoryBackendCreate:
             await memory_backend.create(hashed_key2, duplicate_info)
 
     @pytest.mark.asyncio
+    async def test_memory_backend_create_rejects_mismatched_hash(self, memory_backend: MemoryBackend) -> None:
+        """create() must reject a key_hash argument that disagrees with info.key_hash.
+
+        Regression test for a revocation-integrity bug: the record used to be
+        stored under the ``key_hash`` argument while ``info.key_hash`` (a
+        different value) was preserved inside it. The key would then
+        authenticate via ``key_hash`` (used by get()/the auth middleware),
+        but get_by_id() -- used by the management controller's revoke/delete
+        endpoints -- would return a record whose key_hash pointed nowhere,
+        making the key permanently unrevokable and undeletable through the API.
+        """
+        _, hashed_key = generate_api_key("test_")
+        _, other_hashed_key = generate_api_key("test_")
+
+        mismatched_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=other_hashed_key,  # Does not match the key_hash argument below
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            await memory_backend.create(hashed_key, mismatched_info)
+
+        # Neither hash should have been stored as a side effect of the
+        # rejected create() call.
+        assert await memory_backend.get(hashed_key) is None
+        assert await memory_backend.get(other_hashed_key) is None
+        assert await memory_backend.get_by_id("test-123") is None
+
+    @pytest.mark.asyncio
     async def test_memory_backend_create_sets_created_at(self, memory_backend: MemoryBackend) -> None:
         """Test that created_at is set if not provided."""
         _, hashed_key = generate_api_key("test_")

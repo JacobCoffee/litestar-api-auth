@@ -193,6 +193,16 @@ class RedisBackend:
             msg = "Redis client is not configured"
             raise RuntimeError(msg)
 
+        if info.key_hash != key_hash:
+            # The record must be retrievable by the same hash it is stored
+            # under: get_by_id() returns info.key_hash verbatim, and callers
+            # (e.g. revoke/delete) use that value to look the record back
+            # up. A mismatch here would create a key that authenticates via
+            # key_hash but can never be revoked or deleted through
+            # info.key_hash.
+            msg = "key_hash argument does not match info.key_hash"
+            raise ValueError(msg)
+
         # Set created_at if not provided
         if info.created_at is None:
             info = APIKeyInfo(

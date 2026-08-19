@@ -84,6 +84,16 @@ class MemoryBackend(APIKeyBackend):
             ValueError: If a key with the same hash or ID already exists
         """
         async with self._lock:
+            if info.key_hash != key_hash:
+                # The record must be retrievable by the same hash it is
+                # stored under: get_by_id() returns info.key_hash verbatim,
+                # and callers (e.g. revoke/delete) use that value to look the
+                # record back up. A mismatch here would create a key that
+                # authenticates via key_hash but can never be revoked or
+                # deleted through info.key_hash.
+                msg = "key_hash argument does not match info.key_hash"
+                raise ValueError(msg)
+
             if key_hash in self._store:
                 # Do not interpolate key_hash into the message: it's the exact
                 # stored verifier used for backend lookups, and this

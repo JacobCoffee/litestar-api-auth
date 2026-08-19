@@ -248,7 +248,10 @@ class APIKeyController(Controller):
             raise NotFoundException(detail=f"API key not found: {key_id}")
 
         # Revoke the key
-        await backend.revoke(key_info.key_hash)
+        revoked = await backend.revoke(key_info.key_hash)
+
+        if not revoked:
+            raise NotFoundException(detail=f"API key not found: {key_id}")
 
     @delete(
         "/{key_id:str}",
