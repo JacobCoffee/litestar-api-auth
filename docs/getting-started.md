@@ -207,6 +207,7 @@ The `APIAuthConfig` class accepts the following options:
 | `header_name` | `str` | `"X-API-Key"` | HTTP header for API key |
 | `auto_routes` | `bool` | `True` | Auto-register management routes |
 | `route_prefix` | `str` | `"/api-keys"` | Prefix for auto-registered routes |
+| `management_guards` | `list[Guard]` | requires `api_keys:admin` scope | Guards applied to auto-registered management routes |
 | `enable_openapi` | `bool` | `True` | Include auth in OpenAPI schema |
 | `track_usage` | `bool` | `True` | Update last_used_at on requests |
 

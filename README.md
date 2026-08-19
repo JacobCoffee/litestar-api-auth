@@ -66,6 +66,26 @@ app = Litestar(
 )
 ```
 
+The auto-registered management routes (create/list/get/revoke/delete under
+`route_prefix`) require the `api_keys:admin` scope by default -- they let a
+caller mint keys with arbitrary scopes, so they must never be open to
+anonymous or low-privilege callers. Since a fresh deployment has no keys yet,
+seed the first admin key out-of-band before relying on the API, e.g.:
+
+```python
+from litestar_api_auth.service import generate_api_key
+from litestar_api_auth.backends.base import APIKeyInfo
+
+raw_key, key_hash = generate_api_key(prefix="myapp_")
+await backend.create(
+    key_hash,
+    APIKeyInfo(key_id="bootstrap", key_hash=key_hash, name="bootstrap admin", scopes=["api_keys:admin"]),
+)
+# Store `raw_key` securely -- it is never retrievable again.
+```
+
+To use a different policy, pass `management_guards=[...]` to `APIAuthConfig`.
+
 ### Protecting Routes with Guards
 
 ```python
@@ -202,6 +222,7 @@ async def get_resource() -> dict:
 | `header_name` | `str` | `"X-API-Key"` | HTTP header name for API key |
 | `auto_routes` | `bool` | `True` | Auto-register management routes |
 | `route_prefix` | `str` | `"/api-keys"` | Prefix for management routes |
+| `management_guards` | `list[Guard]` | requires `api_keys:admin` scope | Guards applied to auto-registered management routes |
 | `enable_openapi` | `bool` | `True` | Include auth in OpenAPI schema |
 | `track_usage` | `bool` | `True` | Update last_used_at on requests |
 

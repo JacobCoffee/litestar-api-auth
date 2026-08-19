@@ -6,6 +6,8 @@ applications, including middleware, guards, and dependency injection.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from litestar import Litestar, get
 from litestar.testing import TestClient
@@ -85,6 +87,185 @@ class TestPluginIntegration:
         # Check that routes were registered
         route_paths = [route.path for route in app.routes]
         assert any("/api-keys" in path for path in route_paths)
+
+
+class TestManagementRouteAuthorization:
+    """Regression tests: auto-registered key-management routes must be guarded.
+
+    Before the fix, ``auto_routes=True`` (the default) registered
+    ``APIKeyController`` with no guards at all, so anyone -- authenticated or
+    not -- could create, list, revoke, or delete API keys, including minting
+    a brand new key with arbitrary (e.g. admin) scopes.
+    """
+
+    @pytest.mark.integration
+    async def test_create_key_route_rejects_anonymous_caller(self, backend: MemoryBackend) -> None:
+        """POST /api-keys must reject a request with no API key at all."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.post("/api-keys/", json={"name": "attacker-key", "scopes": ["admin:all"]})
+
+        assert response.status_code == 401
+
+    @pytest.mark.integration
+    async def test_list_keys_route_rejects_anonymous_caller(self, backend: MemoryBackend) -> None:
+        """GET /api-keys must reject a request with no API key, preventing enumeration."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/")
+
+        assert response.status_code == 401
+
+    @pytest.mark.integration
+    async def test_create_key_route_rejects_low_privilege_key(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
+        """A valid key lacking the admin scope must not be able to mint new keys.
+
+        This is the scope-escalation half of the finding: requiring merely
+        *any* valid API key would still let a low-privilege key create a new
+        key carrying higher-privilege scopes.
+        """
+        raw_key, _, _ = test_api_key
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api-keys/",
+                headers={"X-API-Key": raw_key},
+                json={"name": "escalated-key", "scopes": ["admin:all"]},
+            )
+
+        assert response.status_code == 403
+
+    @pytest.mark.integration
+    async def test_create_key_route_allows_admin_scoped_key(self, backend: MemoryBackend) -> None:
+        """A key holding the default ``api_keys:admin`` scope can manage keys."""
+        raw_admin_key, hashed_admin_key = generate_api_key(prefix="test_")
+        await backend.create(
+            hashed_admin_key,
+            APIKeyInfo(
+                key_id="admin-key-123",
+                key_hash=hashed_admin_key,
+                name="Admin Key",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api-keys/",
+                headers={"X-API-Key": raw_admin_key},
+                json={"name": "new-key", "scopes": ["read:users"]},
+            )
+
+        assert response.status_code == 201
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("method", "path_suffix"),
+        [
+            ("get", "some-key-id"),
+            ("post", "some-key-id/revoke"),
+            ("delete", "some-key-id"),
+        ],
+    )
+    async def test_remaining_management_routes_reject_anonymous_caller(
+        self, backend: MemoryBackend, method: str, path_suffix: str
+    ) -> None:
+        """GET/revoke/DELETE by key_id must also reject requests with no API key."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = getattr(client, method)(f"/api-keys/{path_suffix}")
+
+        assert response.status_code == 401
+
+    @pytest.mark.integration
+    async def test_manually_registered_controller_rejects_anonymous_caller(self, backend: MemoryBackend) -> None:
+        """APIKeyController must be guarded even when registered manually (auto_routes=False).
+
+        The controller's own default guard (not just the plugin's auto-route
+        wiring) must reject unauthenticated callers, since the docs show it
+        being registered directly as a route handler.
+        """
+        from litestar.di import Provide
+
+        from litestar_api_auth.controllers import APIKeyController
+
+        app = Litestar(
+            route_handlers=[APIKeyController],
+            dependencies={"backend": Provide(lambda: backend, sync_to_thread=False)},
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=False,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/")
+
+        assert response.status_code == 401
 
 
 class TestMiddlewareIntegration:
@@ -191,6 +372,106 @@ class TestMiddlewareIntegration:
         with TestClient(app) as client:
             response = client.get("/protected", headers={"X-API-Key": "invalid_key_12345"})
             assert response.status_code == 401
+
+
+class TestExcludePaths:
+    """Regression tests: ``APIAuthConfig.exclude_paths`` must actually be honored.
+
+    Before the fix, ``exclude_paths`` was documented as excluding paths from
+    authentication but was never passed to the middleware, so the middleware
+    hashed and looked up the key (and bumped ``last_used_at``) for every
+    request regardless of ``exclude_paths``.
+    """
+
+    @pytest.mark.integration
+    async def test_excluded_path_skips_backend_lookup(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
+        """A request to an excluded path must bypass the middleware entirely.
+
+        Even when a valid ``X-API-Key`` header is present, the backend must
+        not be consulted (no ``get`` lookup, no ``update_last_used`` call)
+        for a path listed in ``exclude_paths``.
+        """
+        raw_key, _, _ = test_api_key
+
+        get_calls = 0
+        update_calls = 0
+        original_get = seeded_backend.get
+        original_update_last_used = seeded_backend.update_last_used
+
+        async def counting_get(key_hash: str) -> APIKeyInfo | None:
+            nonlocal get_calls
+            get_calls += 1
+            return await original_get(key_hash)
+
+        async def counting_update_last_used(key_hash: str) -> None:
+            nonlocal update_calls
+            update_calls += 1
+            await original_update_last_used(key_hash)
+
+        seeded_backend.get = counting_get  # type: ignore[method-assign]
+        seeded_backend.update_last_used = counting_update_last_used  # type: ignore[method-assign]
+
+        @get("/health")
+        async def health_route() -> dict:
+            return {"status": "ok"}
+
+        app = Litestar(
+            route_handlers=[health_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=False,
+                        exclude_paths=["/health"],
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/health", headers={"X-API-Key": raw_key})
+
+        assert response.status_code == 200
+        assert get_calls == 0
+        assert update_calls == 0
+
+    @pytest.mark.integration
+    async def test_non_excluded_path_still_enforces_auth(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
+        """Sanity check: paths not in ``exclude_paths`` still go through the middleware.
+
+        Uses a *valid* key and asserts success, rather than asserting a 401 for
+        an anonymous request -- a 401 would happen whether or not the middleware
+        ran at all, so it wouldn't actually prove the middleware still processes
+        non-excluded paths after wiring up ``exclude_paths``.
+        """
+        raw_key, _, _ = test_api_key
+
+        @get("/protected", guards=[require_api_key])
+        async def protected_route() -> dict:
+            return {"message": "protected"}
+
+        app = Litestar(
+            route_handlers=[protected_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=False,
+                        exclude_paths=["/health"],
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/protected", headers={"X-API-Key": raw_key})
+
+        assert response.status_code == 200
+        assert response.json() == {"message": "protected"}
 
 
 class TestScopeGuardsIntegration:
@@ -340,3 +621,80 @@ class TestCustomHeaderName:
             # Using wrong header should fail
             response = client.get("/protected", headers={"X-API-Key": raw_key})
             assert response.status_code == 401
+
+
+class TestHashImplementationReuse:
+    """Regression test: key creation and key verification must hash through
+    the canonical ``service.hash_api_key`` instead of each reimplementing
+    SHA-256 inline.
+
+    Before the fix, ``APIKeyController.create_api_key`` and
+    ``APIKeyMiddleware._hash_api_key`` each called
+    ``hashlib.sha256(...).hexdigest()`` directly rather than delegating to
+    ``service.hash_api_key``. ``litestar_api_auth.controllers.hash_api_key``
+    and ``litestar_api_auth.middleware.hash_api_key`` did not exist to patch,
+    so this test would fail with an ``AttributeError`` before the fix.
+    """
+
+    @pytest.mark.integration
+    async def test_key_created_and_verified_through_patched_canonical_hash(
+        self, backend: MemoryBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A change to the canonical hash must be honored by both create and verify."""
+
+        def fake_hash(key: str) -> str:
+            # Stand-in for e.g. switching the canonical scheme to a peppered HMAC.
+            return "peppered$" + hashlib.sha256(("pepper::" + key).encode()).hexdigest()
+
+        monkeypatch.setattr("litestar_api_auth.controllers.hash_api_key", fake_hash)
+        monkeypatch.setattr("litestar_api_auth.middleware.hash_api_key", fake_hash)
+
+        # Seed an admin key hashed under the patched scheme so it can authenticate.
+        admin_raw, _ = generate_api_key(prefix="test_")
+        admin_hash = fake_hash(admin_raw)
+        await backend.create(
+            admin_hash,
+            APIKeyInfo(
+                key_id="admin-key",
+                key_hash=admin_hash,
+                name="Admin",
+                scopes=["api_keys:admin"],
+                is_active=True,
+            ),
+        )
+
+        @get("/protected", guards=[require_api_key])
+        async def protected_route() -> dict:
+            return {"ok": True}
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                        route_handlers=[protected_route],
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            # Mint a new key via the controller, authenticating with the
+            # admin key that was hashed under the patched scheme.
+            create_response = client.post(
+                "/api-keys/",
+                headers={"X-API-Key": admin_raw},
+                json={"name": "new-key", "scopes": ["read:users"]},
+            )
+            assert create_response.status_code == 201
+            new_raw_key = create_response.json()["key"]
+
+            # The controller must have stored the hash under the patched
+            # scheme -- not plain SHA-256 -- for the middleware to find it.
+            assert await backend.get(fake_hash(new_raw_key)) is not None
+
+            # The middleware must hash the same way to look the key back up.
+            response = client.get("/protected", headers={"X-API-Key": new_raw_key})
+            assert response.status_code == 200

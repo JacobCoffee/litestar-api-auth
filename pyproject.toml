@@ -308,6 +308,7 @@ max-complexity = 12
     "C901",     # too-complex (plugin setup is inherently complex)
     "TC001",    # move-import (runtime needed for type hints in dependency injection)
     "TC002",    # move-import (lazy import intentional)
+    "ANN401",   # any-type (lifespan hook accepts either a sync or async callable, with or without args)
 ]
 "src/litestar_api_auth/service.py" = [
     "PLR2004",  # magic-value (8 chars is a known constant)

@@ -207,14 +207,14 @@ class TestExtractKeyID:
         test_key = "pyorg_ABC12345DEF67890GHI12345JKL67890MNO12345"
         key_id = extract_key_id(test_key)
 
-        assert key_id == "ABC12345"
+        assert key_id == hash_api_key(test_key)[:8]
 
     def test_extract_key_id_with_custom_prefix(self) -> None:
         """Test key ID extraction with custom prefix."""
         test_key = "custom_XYZ98765abc12345def67890ghi12345jkl67890"
         key_id = extract_key_id(test_key)
 
-        assert key_id == "XYZ98765"
+        assert key_id == hash_api_key(test_key)[:8]
 
     def test_extract_key_id_from_generated_key(self, api_key_pair: tuple[str, str]) -> None:
         """Test extracting key ID from a generated API key."""
@@ -223,8 +223,9 @@ class TestExtractKeyID:
 
         assert key_id is not None
         assert len(key_id) == 8
-        # Should be part of the key after the prefix
-        assert key_id in raw_key
+        # The identifier must be hash-derived, not a substring of the raw
+        # key, so it never exposes any of the key's secret material.
+        assert key_id == hash_api_key(raw_key)[:8]
 
     def test_extract_key_id_no_underscore(self) -> None:
         """Test that keys without underscore return None."""
@@ -247,22 +248,22 @@ class TestExtractKeyID:
         test_key = "test_ABCD1234"
         key_id = extract_key_id(test_key)
 
-        assert key_id == "ABCD1234"
+        assert key_id == hash_api_key(test_key)[:8]
 
     def test_extract_key_id_multiple_underscores(self) -> None:
         """Test key ID extraction with multiple underscores in prefix."""
         test_key = "my_app_v2_ABC12345DEF67890"
         key_id = extract_key_id(test_key)
 
-        # Should split on first underscore and return first 8 chars of remainder
-        assert key_id == "app_v2_A"
+        # Should split on first underscore only, then hash the full key
+        assert key_id == hash_api_key(test_key)[:8]
 
     def test_extract_key_id_trailing_underscore(self) -> None:
         """Test key ID extraction when key ends with underscore."""
         test_key = "test_ABC12345_"
         key_id = extract_key_id(test_key)
 
-        assert key_id == "ABC12345"
+        assert key_id == hash_api_key(test_key)[:8]
 
     def test_extract_key_id_only_underscore(self) -> None:
         """Test that a key that's just an underscore returns None."""

@@ -8,6 +8,7 @@ Uses an async in-memory SQLite database via aiosqlite.
 from __future__ import annotations
 
 import asyncio
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -15,8 +16,27 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from litestar_api_auth.backends.base import APIKeyInfo
-from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
+from litestar_api_auth.backends.sqlalchemy import APIKeyService, SQLAlchemyBackend, SQLAlchemyConfig
 from litestar_api_auth.service import generate_api_key
+
+
+def _patch_get_one_or_none_to_delete_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``APIKeyService.get_one_or_none`` delete the row it just found.
+
+    Simulates the TOCTOU window in ``SQLAlchemyBackend.update()``/``delete()``:
+    another admin deletes the row after it is read but before the
+    read-based write (``svc.update()``/``svc.delete()`` by ``model.id``) runs.
+    """
+    original_get_one_or_none = APIKeyService.get_one_or_none
+
+    async def get_one_or_none_then_delete_row(self: APIKeyService, *args: object, **kwargs: object):
+        model = await original_get_one_or_none(self, *args, **kwargs)
+        if model is not None:
+            await self.repository.session.delete(model)
+            await self.repository.session.commit()
+        return model
+
+    monkeypatch.setattr(APIKeyService, "get_one_or_none", get_one_or_none_then_delete_row)
 
 
 @pytest.fixture
@@ -87,6 +107,83 @@ class TestSQLAlchemyBackendCreate:
 
         with pytest.raises(ValueError, match="already exists"):
             await sa_backend.create(hashed_key, duplicate_info)
+
+    async def test_create_duplicate_hash_does_not_leak_hash_in_traceback(self, sa_backend: SQLAlchemyBackend) -> None:
+        """Test that a real duplicate-hash collision never exposes the hash via traceback chaining.
+
+        Regression test for the full ``traceback.format_exception()`` output
+        (as a debug-mode error page or an error reporter like Sentry/Rich would
+        render) containing the secret hash through the chained IntegrityError's
+        bound SQL parameters. On SQLite with this backend's default
+        advanced_alchemy error messages, a real unique-constraint violation on
+        ``key_hash`` is reported generically (it does not even reach the
+        ``"key_hash" in detail`` branch), so this exercises the actual
+        exploitable path: the generic fallback ``except`` branch.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await sa_backend.create(hashed_key, key_info)
+
+        duplicate_info = APIKeyInfo(
+            key_id="test-456",
+            key_hash=hashed_key,
+            name="Duplicate Key",
+            scopes=["write"],
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await sa_backend.create(hashed_key, duplicate_info)
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+
+    async def test_create_duplicate_hash_does_not_leak_hash(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that the duplicate-hash error neither embeds nor chains the secret hash.
+
+        Regression test for the key_hash being exposed via the ValueError message
+        or via `from exc` chaining the underlying DB exception (which can carry
+        the hash as a bound SQL parameter) into the traceback.
+
+        The real advanced_alchemy/SQLite duplicate-key error text doesn't
+        actually contain the column name, so the ``"key_hash" in detail``
+        branch is exercised directly here by simulating the DB exception,
+        rather than relying on triggering a real unique-constraint violation.
+        """
+        from advanced_alchemy.exceptions import DuplicateKeyError
+
+        _, hashed_key = generate_api_key("test_")
+
+        async def fake_create(*args: object, **kwargs: object) -> None:
+            raise DuplicateKeyError(detail=f"UNIQUE constraint failed: api_keys.key_hash ({hashed_key})")
+
+        monkeypatch.setattr(APIKeyService, "create", fake_create)
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await sa_backend.create(hashed_key, key_info)
+
+        assert "already exists" in str(exc_info.value)
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
 
     async def test_create_duplicate_id(self, sa_backend: SQLAlchemyBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
@@ -304,6 +401,33 @@ class TestSQLAlchemyBackendUpdate:
         assert result is not None
         assert result.is_active is False
 
+    async def test_update_row_deleted_between_read_and_write_returns_none(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a row deleted between the read and the write is treated as not-found.
+
+        Regression test for the update()/delete() get-then-act TOCTOU: if the row
+        disappears after ``get_one_or_none()`` but before ``svc.update()`` runs by
+        ``model.id``, Advanced Alchemy's ``NotFoundError`` must be swallowed and
+        ``None`` returned, matching the documented contract, instead of propagating
+        as an uncaught exception.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="race-update",
+            key_hash=hashed_key,
+            name="Race Key",
+            scopes=["read"],
+        )
+        await sa_backend.create(hashed_key, key_info)
+
+        _patch_get_one_or_none_to_delete_row(monkeypatch)
+
+        result = await sa_backend.update(hashed_key, name="Updated Name")
+
+        assert result is None
+
 
 class TestSQLAlchemyBackendDelete:
     """Tests for deleting API keys from the SQLAlchemy backend."""
@@ -348,6 +472,33 @@ class TestSQLAlchemyBackendDelete:
 
         result = await sa_backend.get_by_id("test-123")
         assert result is None
+
+    async def test_delete_row_deleted_between_read_and_write_returns_false(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a row deleted between the read and the write is treated as not-found.
+
+        Regression test for the update()/delete() get-then-act TOCTOU: if the row
+        disappears after ``get_one_or_none()`` but before ``svc.delete()`` runs by
+        ``model.id``, Advanced Alchemy's ``NotFoundError`` must be swallowed and
+        ``False`` returned, matching the documented contract, instead of propagating
+        as an uncaught exception.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="race-delete",
+            key_hash=hashed_key,
+            name="Race Key",
+            scopes=["read"],
+        )
+        await sa_backend.create(hashed_key, key_info)
+
+        _patch_get_one_or_none_to_delete_row(monkeypatch)
+
+        result = await sa_backend.delete(hashed_key)
+
+        assert result is False
 
 
 class TestSQLAlchemyBackendList:

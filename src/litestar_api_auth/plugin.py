@@ -15,12 +15,24 @@ from litestar_api_auth.backends.base import APIKeyBackend
 
 if TYPE_CHECKING:
     from litestar.config.app import AppConfig
-    from litestar.types import ControllerRouterHandler
+    from litestar.types import ControllerRouterHandler, Guard
 
 __all__ = [
     "APIAuthConfig",
     "APIAuthPlugin",
 ]
+
+
+def _default_management_guards() -> list[Guard]:
+    """Return the default guards applied to auto-registered management routes.
+
+    Mirrors ``APIKeyController``'s own default guards (a fresh list per call)
+    so that auto-registered and manually-registered controllers stay in sync
+    unless a caller explicitly overrides ``APIAuthConfig.management_guards``.
+    """
+    from litestar_api_auth.controllers import APIKeyController
+
+    return list(APIKeyController.guards)
 
 
 @dataclass
@@ -36,11 +48,22 @@ class APIAuthConfig:
         header_name: HTTP header to extract API keys from.
         auto_routes: Whether to auto-register CRUD routes for key management.
         route_prefix: URL prefix for auto-registered routes.
-        exclude_paths: Paths to exclude from API key authentication.
+        exclude_paths: Paths to exclude from API key authentication. Each entry
+            is a regex pattern matched (unanchored) against the request path,
+            per Litestar's ``AbstractMiddleware.exclude`` -- e.g. "/health"
+            also matches "/v1/health". Anchor patterns yourself (e.g.
+            ``r"^/health$"``) if that breadth is undesirable.
         route_handlers: Optional custom route handlers to register.
         dependencies: Optional custom dependencies to inject.
         enable_openapi: Whether to include auth in OpenAPI schema.
         track_usage: Whether to update last_used_at on each request.
+        management_guards: Guards applied to the auto-registered key management
+            routes. Defaults to requiring the ``api_keys:admin`` scope, since
+            these routes can create keys with arbitrary scopes and must not be
+            reachable by unauthenticated callers or by low-privilege keys.
+            Passing an empty list explicitly disables authorization on these
+            routes -- only do this if ``auto_routes`` is also disabled or the
+            routes are guarded some other way.
 
     Example:
         >>> from litestar_api_auth import APIAuthConfig
@@ -62,6 +85,9 @@ class APIAuthConfig:
     dependencies: dict[str, Any] = field(default_factory=dict)
     enable_openapi: bool = True
     track_usage: bool = True
+    # Appended last (rather than interleaved above) so adding this field
+    # doesn't shift the positional order of pre-existing fields.
+    management_guards: list[Guard] = field(default_factory=_default_management_guards)
 
 
 class APIAuthPlugin(InitPluginProtocol):
@@ -182,12 +208,13 @@ class APIAuthPlugin(InitPluginProtocol):
         from litestar_api_auth.middleware import APIKeyMiddleware
 
         # Create middleware configuration
-        # The middleware expects: app, backend, header_name, update_last_used
+        # The middleware expects: app, backend, header_name, update_last_used, exclude_paths
         middleware = DefineMiddleware(
             APIKeyMiddleware,
             backend=self.config.backend,
             header_name=self.config.header_name,
             update_last_used=self.config.track_usage,
+            exclude_paths=self.config.exclude_paths,
         )
 
         # Add to middleware list
@@ -204,9 +231,13 @@ class APIAuthPlugin(InitPluginProtocol):
         """
         from litestar_api_auth.controllers import APIKeyController
 
-        # Create a dynamic controller class with the correct path
+        # Create a dynamic controller class with the correct path and guards.
+        # Key management is a privileged operation (a caller who can create
+        # keys can mint arbitrary scopes), so it must be guarded even though
+        # these routes are auto-registered.
         class ConfiguredAPIKeyController(APIKeyController):
             path = self.config.route_prefix  # type: ignore[misc]
+            guards = self.config.management_guards  # type: ignore[misc]
 
         # Store backend reference for dependency injection
         from litestar.di import Provide
@@ -248,7 +279,10 @@ class APIAuthPlugin(InitPluginProtocol):
                 sig = inspect.signature(hook)
                 params = [p for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
                 result = hook(app) if params else hook()
-            except (ValueError, TypeError):
+            except TypeError:
+                # If hook(app) failed (e.g. bound method that takes no args), retry without args
+                result = hook()
+            except ValueError:
                 result = hook(app)
             if hasattr(result, "__await__"):
                 await result

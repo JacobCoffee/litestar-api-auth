@@ -85,7 +85,10 @@ class MemoryBackend(APIKeyBackend):
         """
         async with self._lock:
             if key_hash in self._store:
-                msg = f"API key with hash {key_hash} already exists"
+                # Do not interpolate key_hash into the message: it's the exact
+                # stored verifier used for backend lookups, and this
+                # exception can surface in debug-mode responses and logs.
+                msg = "API key with this hash already exists"
                 raise ValueError(msg)
 
             if info.key_id in self._id_index:

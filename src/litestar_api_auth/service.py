@@ -38,9 +38,10 @@ def generate_api_key(prefix: str = "pyorg_") -> tuple[str, str]:
             - hashed_key: SHA-256 hash of the raw key for secure storage.
 
     Example:
-        >>> raw_key, hashed_key = generate_api_key(prefix="myapp_")
-        >>> print(f"Raw key: {raw_key[:15]}...")  # Only show prefix for security
-        Raw key: myapp_AbCdEfGh...
+        >>> prefix = "myapp_"
+        >>> raw_key, hashed_key = generate_api_key(prefix=prefix)
+        >>> print(f"Raw key: {prefix}...")  # Show only the known prefix, never the secret
+        Raw key: myapp_...
         >>> print(f"Hash length: {len(hashed_key)}")
         Hash length: 64
 
@@ -134,21 +135,22 @@ def verify_api_key(raw_key: str, hashed_key: str) -> bool:
 def extract_key_id(raw_key: str) -> str | None:
     """Extract a unique identifier from a prefixed API key.
 
-    This function extracts the first 8 characters of the random portion
-    of an API key to use as a short identifier. This can be useful for
-    logging and user interfaces without exposing the full key.
+    This function derives a short identifier from a SHA-256 hash of the key
+    (the same hash produced by :func:`hash_api_key`) rather than slicing the
+    key's own characters, so the identifier is safe to log or display without
+    exposing any of the key's secret material.
 
     Args:
         raw_key: The complete API key with prefix.
 
     Returns:
-        The first 8 characters of the key after the prefix, or None if
+        The first 8 hex characters of the key's SHA-256 hash, or None if
         the key format is invalid.
 
     Example:
         >>> raw_key = "pyorg_AbCdEfGh123456789012345678901234567890"
         >>> extract_key_id(raw_key)
-        'AbCdEfGh'
+        '2c9359b5'
         >>> extract_key_id("invalid")
         None
 
@@ -156,8 +158,13 @@ def extract_key_id(raw_key: str) -> str | None:
         This assumes the prefix ends with an underscore. Keys without
         an underscore will return None.
 
-        The key_id is not cryptographically significant - it's just a
-        convenient short identifier for display purposes.
+        The key_id is not cryptographically significant and is not
+        guaranteed to be collision-free - it's a short, convenient
+        identifier for display and log correlation, not a unique or
+        secret value. Because it is hash-derived rather than a substring
+        of the key, it never reveals any of the key's own characters,
+        making it safe to log for the high-entropy keys produced by
+        :func:`generate_api_key`.
 
     Raises:
         InvalidAPIKeyError: If the key format is invalid or too short.
@@ -172,11 +179,12 @@ def extract_key_id(raw_key: str) -> str | None:
 
     key_portion = parts[1]
 
-    # Return first 8 characters as the key ID
     if len(key_portion) < 8:
         raise InvalidAPIKeyError(
             reason="Key is too short",
             detail=f"Expected at least 8 characters after prefix, got {len(key_portion)}",
         )
 
-    return key_portion[:8]
+    # Derive the ID from a hash of the full key instead of slicing the raw
+    # secret, so the identifier never exposes actual key material.
+    return hash_api_key(raw_key)[:8]

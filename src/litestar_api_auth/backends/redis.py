@@ -31,6 +31,11 @@ class RedisConfig:
         client: An async Redis client instance.
         key_prefix: Prefix for all Redis keys (for namespacing).
         ttl: Optional TTL in seconds for stored keys (None for no expiration).
+            This is a hard cutoff measured from creation, not a sliding
+            inactivity timeout: metadata updates (including update_last_used())
+            preserve the existing TTL via SET ... KEEPTTL rather than
+            extending it. KEEPTTL requires Redis server 6.0+ -- older servers
+            will reject the command.
     """
 
     client: Redis | None = None
@@ -300,6 +305,12 @@ class RedisBackend:
         Fetches the existing key, merges the provided updates, and writes
         the updated record back to Redis.
 
+        Uses WATCH/MULTI so the read-modify-write is atomic: if another
+        client (e.g. a concurrent revoke, delete, or update_last_used call)
+        touches the record between our read and write, the transaction
+        aborts and we retry against the fresh value instead of blindly
+        overwriting it with a stale copy.
+
         Args:
             key_hash: SHA-256 hash of the API key.
             **updates: Fields to update (name, scopes, is_active, etc.).
@@ -308,45 +319,90 @@ class RedisBackend:
             The updated APIKeyInfo if found, None otherwise.
 
         Raises:
-            RuntimeError: If the Redis client is not configured.
+            RuntimeError: If the Redis client is not configured, or if the
+                update could not be applied due to persistent concurrent writes.
         """
         if self._client is None:
             msg = "Redis client is not configured"
             raise RuntimeError(msg)
 
-        info = await self.get(key_hash)
-        if info is None:
-            return None
-
-        # Create updated info with new values, mirroring the memory backend pattern
-        updated_info = APIKeyInfo(
-            key_id=info.key_id,
-            key_hash=info.key_hash,
-            name=updates.get("name", info.name),
-            scopes=updates.get("scopes", info.scopes),
-            is_active=updates.get("is_active", info.is_active),
-            created_at=info.created_at,
-            expires_at=updates.get("expires_at", info.expires_at),
-            last_used_at=updates.get("last_used_at", info.last_used_at),
-            metadata=updates.get("metadata", info.metadata),
-        )
-
         redis_key = self._make_key(key_hash)
-        serialized = self._serialize_info(updated_info)
-        await self._client.set(redis_key, serialized)
 
-        # Re-apply TTL if configured (SET overwrites TTL)
-        if self.config.ttl is not None:
-            await self._client.expire(redis_key, self.config.ttl)
-            await self._client.expire(self._make_id_key(info.key_id), self.config.ttl)
+        # Use WATCH/MULTI so a concurrent writer (revoke, delete, another
+        # update) invalidates our transaction rather than being clobbered
+        # by a stale read-modify-write.
+        from redis.exceptions import WatchError
 
-        return updated_info
+        max_retries = 5
+        for _ in range(max_retries):
+            pipeline = self._client.pipeline(transaction=True)
+            try:
+                await pipeline.watch(redis_key)
+                # Read through the pipeline (not self._client) so the GET runs on
+                # the connection already reserved by WATCH, instead of checking
+                # out a second connection from the pool for every call -- which
+                # would otherwise double connection-pool pressure on this path,
+                # since update_last_used() invokes update() on every authenticated request.
+                data = await pipeline.get(redis_key)
+                if data is None:
+                    return None
+
+                info = self._deserialize_info(data if isinstance(data, str) else data.decode())
+
+                # Create updated info with new values, mirroring the memory backend pattern
+                updated_info = APIKeyInfo(
+                    key_id=info.key_id,
+                    key_hash=info.key_hash,
+                    name=updates.get("name", info.name),
+                    scopes=updates.get("scopes", info.scopes),
+                    is_active=updates.get("is_active", info.is_active),
+                    created_at=info.created_at,
+                    expires_at=updates.get("expires_at", info.expires_at),
+                    last_used_at=updates.get("last_used_at", info.last_used_at),
+                    metadata=updates.get("metadata", info.metadata),
+                )
+                serialized = self._serialize_info(updated_info)
+
+                pipeline.multi()
+                # keepttl preserves whatever TTL Redis already has on the key
+                # instead of wiping it (plain SET clears TTL) or re-applying
+                # the full configured TTL. Re-applying the full TTL here would
+                # turn RedisConfig.ttl into a sliding inactivity timeout --
+                # since update_last_used() calls update() on every
+                # authenticated request, an actively used key would have its
+                # expiry pushed back forever instead of expiring as a hard
+                # cutoff measured from creation.
+                # xx=True guards the narrow race where the key expires between
+                # our watched GET and EXEC: without it, KEEPTTL on a key that
+                # no longer exists would recreate it with no TTL at all (i.e.
+                # a key that should have expired coming back permanently).
+                pipeline.set(redis_key, serialized, keepttl=True, xx=True)
+                results = await pipeline.execute()
+                if not results[0]:
+                    return None
+                return updated_info
+            except WatchError:
+                continue
+            finally:
+                await pipeline.reset()
+
+        msg = "Failed to update API key due to concurrent writes"
+        raise RuntimeError(msg)
 
     async def delete(self, key_hash: str) -> bool:
         """Delete an API key from Redis.
 
         Removes the primary hash key, the secondary ID index key, and
         the entry from the all_keys set.
+
+        Uses WATCH/MULTI, the same pattern as update(), so the read (to
+        find the ID index), the deletes, and the tracking-set removal
+        happen as one atomic transaction: a concurrent create() that
+        re-creates this exact hash between our read and the transaction
+        aborts our EXEC (WatchError) instead of having its SADD silently
+        undone by our SREM -- which would otherwise leave a live, freshly
+        (re)created key permanently missing from list() while it still
+        authenticates via get().
 
         Args:
             key_hash: SHA-256 hash of the API key.
@@ -355,25 +411,44 @@ class RedisBackend:
             True if the key was deleted, False if not found.
 
         Raises:
-            RuntimeError: If the Redis client is not configured.
+            RuntimeError: If the Redis client is not configured, or if the
+                delete could not be applied due to persistent concurrent writes.
         """
         if self._client is None:
             msg = "Redis client is not configured"
             raise RuntimeError(msg)
 
-        # First fetch the info so we can clean up the ID index
-        info = await self.get(key_hash)
-        if info is None:
-            return False
-
         redis_key = self._make_key(key_hash)
-        id_key = self._make_id_key(info.key_id)
 
-        # Delete the primary key, the ID index, and remove from the all_keys set
-        await self._client.delete(redis_key, id_key)
-        await self._client.srem(self._all_keys_key, key_hash)
+        from redis.exceptions import WatchError
 
-        return True
+        max_retries = 5
+        for _ in range(max_retries):
+            pipeline = self._client.pipeline(transaction=True)
+            try:
+                await pipeline.watch(redis_key)
+                # Read through the pipeline (not self._client) so this
+                # runs on the connection already reserved by WATCH.
+                data = await pipeline.get(redis_key)
+                if data is None:
+                    return False
+
+                info = self._deserialize_info(data if isinstance(data, str) else data.decode())
+                id_key = self._make_id_key(info.key_id)
+
+                pipeline.multi()
+                # Delete the primary key, the ID index, and remove from the all_keys set
+                pipeline.delete(redis_key, id_key)
+                pipeline.srem(self._all_keys_key, key_hash)
+                await pipeline.execute()
+                return True
+            except WatchError:
+                continue
+            finally:
+                await pipeline.reset()
+
+        msg = "Failed to delete API key due to concurrent writes"
+        raise RuntimeError(msg)
 
     async def list(
         self,
@@ -421,9 +496,39 @@ class RedisBackend:
             data = raw if isinstance(raw, str) else raw.decode()
             results.append(self._deserialize_info(data))
 
-        # Clean up stale entries from the tracking set
+        # Clean up stale entries from the tracking set. A blind SREM here
+        # would race a concurrent create() re-creating the same hash: if
+        # create()'s SADD (done atomically with its SET) lands between our
+        # MGET above and this cleanup, an unconditional SREM would strip the
+        # tracking entry for a key that is live again -- making it invisible
+        # to list() for the rest of its life even though it still
+        # authenticates via get(). Use WATCH/MULTI, the same pattern as
+        # update(), to re-check existence at the moment of removal and skip
+        # the SREM if the key came back.
         if stale_hashes:
-            await self._client.srem(self._all_keys_key, *stale_hashes)
+            from redis.exceptions import WatchError
+
+            for stale_hash in stale_hashes:
+                redis_key = self._make_key(stale_hash)
+                pipeline = self._client.pipeline(transaction=True)
+                try:
+                    await pipeline.watch(redis_key)
+                    # Read through the pipeline (not self._client) so this
+                    # re-check runs on the connection already reserved by
+                    # WATCH instead of checking out a second one.
+                    if await pipeline.get(redis_key) is not None:
+                        # Recreated since our MGET; leave it tracked.
+                        continue
+                    pipeline.multi()
+                    pipeline.srem(self._all_keys_key, stale_hash)
+                    await pipeline.execute()
+                except WatchError:
+                    # Key changed concurrently between WATCH and EXEC;
+                    # leave the tracking entry alone rather than risk
+                    # removing a live key.
+                    continue
+                finally:
+                    await pipeline.reset()
 
         # Sort by created_at descending (newest first), then by key_id descending for stability
         results.sort(

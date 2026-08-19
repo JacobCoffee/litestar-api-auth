@@ -7,8 +7,10 @@ request state for use by guards.
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Protocol
 
+import msgspec
 from litestar.middleware import AbstractMiddleware
 
 from litestar_api_auth.backends.base import APIKeyInfo
@@ -18,6 +20,7 @@ from litestar_api_auth.exceptions import (
     APIKeyRevokedError,
     InvalidAPIKeyError,
 )
+from litestar_api_auth.service import hash_api_key
 
 if TYPE_CHECKING:
     from litestar.types import ASGIApp, Receive, Scope, Send
@@ -94,6 +97,7 @@ class APIKeyMiddleware(AbstractMiddleware):
         backend: APIKeyBackend,
         header_name: str = "X-API-Key",
         update_last_used: bool = True,
+        exclude_paths: str | list[str] | None = None,
     ) -> None:
         """Initialize the middleware.
 
@@ -102,8 +106,13 @@ class APIKeyMiddleware(AbstractMiddleware):
             backend: The storage backend for API keys.
             header_name: The HTTP header name to extract the key from. Defaults to "X-API-Key".
             update_last_used: Whether to update the last_used_at timestamp. Defaults to True.
+            exclude_paths: Regex pattern or list of regex patterns matched
+                (unanchored) against the request path. Matching requests
+                bypass this middleware entirely (see
+                ``AbstractMiddleware.exclude``), so no lookup or usage-update
+                is performed for them even if an API key header is present.
         """
-        super().__init__(app=app)
+        super().__init__(app=app, exclude=exclude_paths)
         self.backend = backend
         self.header_name = header_name.lower()  # HTTP headers are case-insensitive
         self.update_last_used = update_last_used
@@ -116,7 +125,18 @@ class APIKeyMiddleware(AbstractMiddleware):
             receive: The ASGI receive channel.
             send: The ASGI send channel.
         """
-        # Only process HTTP requests
+        if "state" not in scope:
+            scope["state"] = {}
+
+        # Clear any pre-existing/stale state["api_key"] up front so a value
+        # left over from another middleware (or a prior request) can never
+        # be trusted as authenticated unless this middleware validates a key
+        # on *this* request. This must happen before the HTTP-only check
+        # below, since AbstractMiddleware also routes WebSocket scopes here.
+        scope["state"]["api_key"] = None
+
+        # Only process HTTP requests -- this middleware does not authenticate
+        # WebSocket connections, but stale state has already been cleared above.
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -128,22 +148,30 @@ class APIKeyMiddleware(AbstractMiddleware):
         if api_key:
             try:
                 key_info = await self._validate_api_key(api_key)
-                # Store the APIKeyInfo in request state for guards to access
-                if "state" not in scope:
-                    scope["state"] = {}
-                scope["state"]["api_key"] = key_info
+                # Store the APIKeyInfo in request state for guards to access.
+                # key_hash is redacted first: it's the SHA-256 verifier used
+                # for backend lookups only, and a route handler that returns
+                # this object directly (see the Warning in
+                # guards.get_api_key_info's docstring) would otherwise
+                # serialize the hash into the HTTP response.
+                scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
 
-                # Update last used timestamp if enabled
+                # Update last used timestamp if enabled. Usage tracking is
+                # best-effort: a backend that raises RuntimeError here (e.g.
+                # Redis exhausting its WATCH/MULTI retries under heavy write
+                # contention on this key) must not turn an otherwise valid,
+                # already-authenticated request into a failure.
                 if self.update_last_used:
                     key_hash = self._hash_api_key(api_key)
-                    await self.backend.update_last_used(key_hash)
+                    with contextlib.suppress(RuntimeError):
+                        await self.backend.update_last_used(key_hash)
             except (
                 APIKeyNotFoundError,
                 APIKeyExpiredError,
                 APIKeyRevokedError,
                 InvalidAPIKeyError,
             ):
-                # Don't store anything in state if validation fails
+                # state["api_key"] stays None (cleared above) if validation fails
                 # Guards will handle the missing key appropriately
                 pass
 
@@ -207,20 +235,14 @@ class APIKeyMiddleware(AbstractMiddleware):
     def _hash_api_key(self, api_key: str) -> str:
         """Hash an API key for backend lookup.
 
-        This method should use the same hashing algorithm as the key generation
-        service. SHA-256 is the standard for API key hashing.
+        Delegates to :func:`litestar_api_auth.service.hash_api_key` so the
+        middleware always hashes with the same algorithm the key generation
+        service uses, even if that algorithm changes later.
 
         Args:
             api_key: The raw API key value.
 
         Returns:
             The hashed API key.
-
-        Note:
-            This is a placeholder implementation. In production, this should
-            use the same hashing method as your key generation service
-            (typically hashlib.sha256).
         """
-        import hashlib
-
-        return hashlib.sha256(api_key.encode()).hexdigest()
+        return hash_api_key(api_key)

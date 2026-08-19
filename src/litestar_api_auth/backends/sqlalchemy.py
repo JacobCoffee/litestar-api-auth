@@ -290,15 +290,23 @@ class SQLAlchemyBackend:
                 )
                 return _model_to_info(result)
         except (IntegrityError, DuplicateKeyError) as exc:
+            # Do not chain the DB exception via `from exc` on any of these
+            # branches: the original IntegrityError's statement/params can
+            # retain key_hash (the exact stored verifier used for backend
+            # lookups) as a bound SQL parameter regardless of which
+            # constraint failed, so chaining it would surface the hash in
+            # debug-mode responses, logs, and error reporters that capture
+            # tracebacks. `key_hash` itself is also never interpolated into
+            # a message below.
             detail = str(exc).lower()
             if "key_id" in detail:
                 msg = f"API key with ID {info.key_id} already exists"
-                raise ValueError(msg) from exc
+                raise ValueError(msg) from None
             if "key_hash" in detail:
-                msg = f"API key with hash {key_hash} already exists"
-                raise ValueError(msg) from exc
+                msg = "API key with this hash already exists"
+                raise ValueError(msg) from None
             msg = "API key with the same hash or ID already exists"
-            raise ValueError(msg) from exc
+            raise ValueError(msg) from None
 
     async def get(self, key_hash: str) -> APIKeyInfo | None:
         """Retrieve an API key by its hash.
@@ -351,6 +359,8 @@ class SQLAlchemyBackend:
         if self._sessionmaker is None:
             return None
 
+        from advanced_alchemy.exceptions import NotFoundError
+
         async with self._sessionmaker() as session:
             svc = self._make_service(session)
             model = await svc.get_one_or_none(self._model.key_hash == key_hash)
@@ -366,7 +376,11 @@ class SQLAlchemyBackend:
                     update_data[field] = value
 
             update_data["id"] = model.id
-            result = await svc.update(update_data, item_id=model.id, auto_commit=True)
+            try:
+                result = await svc.update(update_data, item_id=model.id, auto_commit=True)
+            except NotFoundError:
+                # Row was deleted between the read above and this write.
+                return None
             return _model_to_info(result)
 
     async def delete(self, key_hash: str) -> bool:
@@ -381,12 +395,18 @@ class SQLAlchemyBackend:
         if self._sessionmaker is None:
             return False
 
+        from advanced_alchemy.exceptions import NotFoundError
+
         async with self._sessionmaker() as session:
             svc = self._make_service(session)
             model = await svc.get_one_or_none(self._model.key_hash == key_hash)
             if model is None:
                 return False
-            await svc.delete(model.id, auto_commit=True)
+            try:
+                await svc.delete(model.id, auto_commit=True)
+            except NotFoundError:
+                # Row was deleted between the read above and this write.
+                return False
             return True
 
     async def list(

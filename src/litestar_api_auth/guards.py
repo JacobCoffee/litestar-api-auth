@@ -15,7 +15,8 @@ from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException, PermissionDeniedException
 from litestar.handlers import BaseRouteHandler
 
-from litestar_api_auth.types import APIKeyInfo, ScopeRequirement
+from litestar_api_auth.backends.base import APIKeyInfo
+from litestar_api_auth.types import ScopeRequirement
 
 if TYPE_CHECKING:
     from litestar.types import Guard
@@ -42,6 +43,14 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
 
     Raises:
         NotAuthorizedException: If no API key is present in the request state.
+
+    Warning:
+        The returned struct is :class:`litestar_api_auth.backends.base.APIKeyInfo`,
+        which carries a ``key_hash`` field. ``APIKeyMiddleware`` redacts it to
+        an empty string before storing this object in request state, so the
+        real SHA-256 hash never reaches here -- but still avoid returning or
+        serializing this object directly from a route handler; pick the
+        specific fields you need (as in the example below) instead.
 
     Example:
         >>> from litestar import get, Request

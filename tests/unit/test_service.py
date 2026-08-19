@@ -127,7 +127,7 @@ class TestExtractKeyID:
         raw_key = "pyorg_AbCdEfGh123456789012345678901234567890"
         key_id = extract_key_id(raw_key)
 
-        assert key_id == "AbCdEfGh"
+        assert key_id == hash_api_key(raw_key)[:8]
 
     def test_returns_none_for_key_without_underscore(self) -> None:
         """Test that keys without underscore return None."""
@@ -150,8 +150,8 @@ class TestExtractKeyID:
         raw_key = "my_app_AbCdEfGh123456789012345678901234567890"
         key_id = extract_key_id(raw_key)
 
-        # Should split on first underscore only
-        assert key_id == "app_AbCd"
+        # Should split on first underscore only, and hash the full raw key
+        assert key_id == hash_api_key(raw_key)[:8]
 
     def test_extracts_from_generated_key(self) -> None:
         """Test extraction from a generated key."""
@@ -160,4 +160,26 @@ class TestExtractKeyID:
 
         assert key_id is not None
         assert len(key_id) == 8
-        assert key_id == raw_key[5:13]  # After "test_", first 8 chars
+        assert key_id == hash_api_key(raw_key)[:8]
+
+    def test_key_id_does_not_expose_key_material(self) -> None:
+        """Regression test: key_id must not leak characters of the secret.
+
+        Previously extract_key_id() returned the first 8 characters of the
+        key's random portion verbatim, so logging the "safe" identifier per
+        the docstring's own advice leaked 48 bits of the secret. The
+        identifier must now be derived from a hash of the key, independent
+        of the key's literal characters.
+        """
+        # Fixed (not randomly generated) key so this assertion is
+        # deterministic rather than merely astronomically unlikely to flake.
+        raw_key = "test_AbCdEfGh123456789012345678901234567890"
+        key_portion = raw_key.split("_", 1)[1]
+        key_id = extract_key_id(raw_key)
+
+        assert key_id is not None
+        # The old vulnerable behavior: key_id was a verbatim substring of the
+        # secret. That must no longer be true.
+        assert key_id != key_portion[:8]
+        # The identifier should instead match the hash-derived value.
+        assert key_id == hash_api_key(raw_key)[:8]

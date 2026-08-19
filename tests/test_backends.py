@@ -67,6 +67,37 @@ class TestMemoryBackendCreate:
             await memory_backend.create(hashed_key, duplicate_info)
 
     @pytest.mark.asyncio
+    async def test_memory_backend_duplicate_hash_error_does_not_leak_hash(self, memory_backend: MemoryBackend) -> None:
+        """Duplicate-hash error must not embed the stored key_hash verifier.
+
+        The hash is the exact value backends use for lookups; leaking it in
+        an exception message (surfaced via debug-mode responses or logs)
+        would expose the stored credential unnecessarily.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await memory_backend.create(hashed_key, key_info)
+
+        duplicate_info = APIKeyInfo(
+            key_id="test-456",
+            key_hash=hashed_key,
+            name="Duplicate Key",
+            scopes=["write"],
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await memory_backend.create(hashed_key, duplicate_info)
+
+        assert hashed_key not in str(exc_info.value)
+        assert str(exc_info.value) == "API key with this hash already exists"
+
+    @pytest.mark.asyncio
     async def test_memory_backend_create_duplicate_id(self, memory_backend: MemoryBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
         _raw_key1, hashed_key1 = generate_api_key("test_")
