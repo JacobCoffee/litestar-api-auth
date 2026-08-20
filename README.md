@@ -66,6 +66,53 @@ app = Litestar(
 )
 ```
 
+The auto-registered management routes (create/list/get/revoke/delete under
+`route_prefix`) require the `api_keys:admin` scope by default -- they let a
+caller mint keys with arbitrary scopes, so they must never be open to
+anonymous or low-privilege callers. Since a fresh deployment has no keys yet,
+seed the first admin key out-of-band before relying on the API, e.g.:
+
+```python
+from litestar_api_auth import mint_api_key
+
+raw_key, key_info = await mint_api_key(
+    backend,
+    name="bootstrap admin",
+    scopes=["api_keys:admin"],
+    prefix="myapp_",
+)
+# Store `raw_key` securely -- it is never retrievable again.
+```
+
+`mint_api_key()` is the single entry point for minting a key: it generates the
+key, derives the `key_id`, builds the `APIKeyInfo` record and persists it via
+`backend.create()`. Application code should never assemble the hash or the
+struct by hand -- that is how a caller ends up hashing with a scheme the
+middleware does not verify against.
+
+To use a different policy, pass `management_guards=[...]` to `APIAuthConfig`.
+
+### Bearer Tokens
+
+Set `auth_scheme` to accept a scheme-prefixed header such as
+`Authorization: Bearer <key>`:
+
+```python
+APIAuthConfig(
+    backend=backend,
+    header_name="Authorization",
+    auth_scheme="Bearer",
+)
+```
+
+The prefix match is case-insensitive, and a header value *without* the prefix
+is ignored entirely rather than treated as a key -- so an unrelated credential
+sharing the same header (`Basic ...`, a JWT under another scheme) can never
+authenticate. The generated OpenAPI schema documents this as an HTTP bearer
+scheme instead of an `apiKey` header. Leaving `auth_scheme` unset (the
+default) keeps the plain `X-API-Key` behavior, where the whole header value is
+the key.
+
 ### Protecting Routes with Guards
 
 ```python
@@ -89,12 +136,16 @@ async def admin_route() -> dict:
 from datetime import datetime, timedelta, timezone
 from litestar_api_auth.types import APIKeyInfo
 
-# API key information is available after authentication
+# `APIKeyInfo` is the one record type the library uses: backends store it,
+# the middleware puts it in `request.state.api_key`, and guards read it.
+# `litestar_api_auth.types.APIKeyInfo` and
+# `litestar_api_auth.backends.base.APIKeyInfo` are the same class.
 key_info = APIKeyInfo(
     key_id="abc123",
-    prefix="myapp_",
     name="Production API Key",
     scopes=["read:users", "write:posts"],
+    key_hash="...",  # sensitive: the stored verifier
+    prefix="myapp_",
     created_at=datetime.now(timezone.utc),
     expires_at=datetime.now(timezone.utc) + timedelta(days=365),
     last_used_at=None,
@@ -131,10 +182,20 @@ API keys can be in one of three states:
 
 ```python
 from sqlalchemy.ext.asyncio import create_async_engine
-from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend
+from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
 engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/db")
-backend = SQLAlchemyBackend(engine)
+backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine))
+```
+
+If the engine is owned and shared by the host application, pass
+`dispose_engine=False` so closing the backend on shutdown does not tear down
+connections the rest of the application still uses:
+
+```python
+backend = SQLAlchemyBackend(
+    config=SQLAlchemyConfig(engine=app_engine, dispose_engine=False)
+)
 ```
 
 ### Redis Backend
@@ -200,9 +261,12 @@ async def get_resource() -> dict:
 | `backend` | `APIKeyBackend` | Required | Storage backend instance |
 | `key_prefix` | `str` | `"pyorg_"` | Prefix for generated keys |
 | `header_name` | `str` | `"X-API-Key"` | HTTP header name for API key |
+| `auth_scheme` | `str \| None` | `None` | Scheme prefix required on the header value, e.g. `"Bearer"`. `None` means the whole value is the key |
 | `auto_routes` | `bool` | `True` | Auto-register management routes |
 | `route_prefix` | `str` | `"/api-keys"` | Prefix for management routes |
+| `management_guards` | `list[Guard]` | requires `api_keys:admin` scope | Guards applied to auto-registered management routes |
 | `enable_openapi` | `bool` | `True` | Include auth in OpenAPI schema |
+| `openapi_global_security` | `bool` | `False` | Also advertise the scheme as a document-wide security requirement (marks *every* route as key-authed) |
 | `track_usage` | `bool` | `True` | Update last_used_at on requests |
 
 ## Documentation

@@ -41,47 +41,97 @@ ScopeRequirement = Literal["all", "any"]
 """
 
 
-class APIKeyInfo(msgspec.Struct, frozen=True):
-    """Immutable container for API key metadata and state.
+class APIKeyInfo(msgspec.Struct, kw_only=True):
+    """Canonical container for API key metadata and state.
 
-    This struct represents the complete information about an API key,
-    excluding the actual key value (which should only be shown once at creation).
+    This is the one struct the whole library uses: backends store and return
+    it, ``APIKeyMiddleware`` places it in ``request.state.api_key``, and
+    guards read it. It is re-exported as
+    :class:`litestar_api_auth.backends.base.APIKeyInfo` for backwards
+    compatibility -- both names refer to this exact class, so ``is`` and
+    ``isinstance`` checks agree across the two import paths.
+
+    It carries metadata about an API key, never the plaintext key value
+    (which should only be shown once at creation). ``key_hash`` *is* the
+    stored verifier and is therefore sensitive: the middleware blanks it on
+    the copy it exposes through request state (see
+    ``APIKeyMiddleware.__call__``).
 
     Attributes:
         key_id: Unique identifier for the API key.
-        prefix: The prefix portion of the key (e.g., "pyorg_").
         name: Human-readable name/description for the key.
         scopes: List of permission scopes granted to this key.
+        key_hash: Hash of the API key as stored by the backend. Blanked to
+            ``""`` on the copy the middleware exposes through request state.
+        prefix: Optional prefix portion of the key (e.g., "pyorg_"). Purely
+            informational -- the bundled backends do not persist it, so a
+            record read back out of storage generally has ``None`` here.
+        is_active: Whether the key is currently active (not revoked).
         created_at: Timestamp when the key was created.
         expires_at: Optional expiration timestamp. None means no expiration.
         last_used_at: Optional timestamp of last successful authentication. None if never used.
-        is_active: Whether the key is currently active (not revoked).
         metadata: Additional arbitrary metadata associated with the key.
 
     Example:
-        >>> from datetime import datetime, timedelta
+        >>> from datetime import datetime, timedelta, timezone
         >>> key_info = APIKeyInfo(
         ...     key_id="abc123",
-        ...     prefix="pyorg_",
         ...     name="Production API Key",
         ...     scopes=["read:users", "write:posts"],
-        ...     created_at=datetime.utcnow(),
-        ...     expires_at=datetime.utcnow() + timedelta(days=365),
-        ...     last_used_at=None,
-        ...     is_active=True,
+        ...     key_hash="0" * 64,
+        ...     prefix="pyorg_",
+        ...     created_at=datetime.now(timezone.utc),
+        ...     expires_at=datetime.now(timezone.utc) + timedelta(days=365),
         ...     metadata={"owner": "admin@example.com"},
         ... )
     """
 
+    # Keyword-only on purpose. The two structs this consolidates had
+    # *different* positional orders (``key_id, prefix, name, scopes,
+    # created_at`` for the old public struct; ``key_id, key_hash, name,
+    # scopes`` for the old backend one), and ``msgspec.Struct`` does not
+    # validate field types on direct construction -- so any order chosen here
+    # would let an old positional call silently build a corrupted record
+    # (e.g. a hash landing in ``name``) instead of failing. Requiring
+    # keywords turns that into an immediate ``TypeError``.
     key_id: str
-    prefix: str
     name: str
     scopes: list[str]
-    created_at: datetime
+    key_hash: str = ""
+    prefix: str | None = None
+    is_active: bool = True
+    created_at: datetime | None = None
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
-    is_active: bool = True
-    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+    metadata: dict[str, Any] | None = None
+
+    @property
+    def has_valid_types(self) -> bool:
+        """Whether ``is_active`` and ``scopes`` actually match the types this class declares.
+
+        ``msgspec.Struct`` does not enforce field types when a struct is built
+        directly in Python (only decoding via ``msgspec.json.decode``/
+        ``msgspec.convert`` does), so a custom/legacy backend, migrated or
+        corrupted serialized data, or direct programmatic seeding can produce
+        a record whose ``is_active`` is a truthy non-``bool`` (e.g. the string
+        ``"false"``) or whose ``scopes`` is a ``str`` instead of a
+        ``list[str]``. Both would silently fail open for a caller that trusts
+        this record without checking this property first: ``not "false"`` is
+        ``False``, so the "is the key active" checks in
+        ``APIKeyMiddleware._validate_api_key`` and ``guards.get_api_key_info``
+        would both pass, and ``"admin" in "api_keys:admin"`` is a substring
+        match rather than a membership check, so ``has_scope``/``has_scopes``
+        would too.
+
+        Returns:
+            True if ``is_active`` is actually a ``bool`` and ``scopes`` is
+            actually a ``list`` of ``str``, False otherwise.
+        """
+        return (
+            isinstance(self.is_active, bool)
+            and isinstance(self.scopes, list)
+            and all(isinstance(s, str) for s in self.scopes)
+        )
 
     @property
     def state(self) -> APIKeyState:
@@ -151,17 +201,30 @@ class APIKeyInfo(msgspec.Struct, frozen=True):
 
     def has_scopes(
         self,
-        required_scopes: list[str],
+        scopes: list[str] | None = None,
         requirement: ScopeRequirement = "all",
+        *,
+        required_scopes: list[str] | None = None,
     ) -> bool:
         """Check if the key has the required scopes.
 
+        Every historical call convention of the two structs this consolidates
+        keeps working: ``requirement`` is accepted positionally *and* by
+        keyword (the backend struct made it keyword-only), and
+        ``required_scopes`` is a backwards-compatible alias for ``scopes``
+        (the name the old public struct used for its first parameter).
+
         Args:
-            required_scopes: List of scopes to check for.
+            scopes: List of scopes to check for.
             requirement: Whether "all" scopes must match or "any" scope is sufficient.
+            required_scopes: Legacy alias for ``scopes``.
 
         Returns:
             True if the scope requirement is satisfied.
+
+        Raises:
+            TypeError: If neither ``scopes`` nor ``required_scopes`` is given.
+            ValueError: If requirement is not "all" or "any".
 
         Example:
             >>> key_info.has_scopes(["read:users", "write:users"], requirement="all")
@@ -169,7 +232,14 @@ class APIKeyInfo(msgspec.Struct, frozen=True):
             >>> key_info.has_scopes(["read:users", "write:posts"], requirement="any")
             True
         """
+        wanted = scopes if scopes is not None else required_scopes
+        if wanted is None:
+            msg = "has_scopes() missing required argument: 'scopes'"
+            raise TypeError(msg)
+
         if requirement == "all":
-            return all(scope in self.scopes for scope in required_scopes)
-        # requirement == "any"
-        return any(scope in self.scopes for scope in required_scopes)
+            return all(scope in self.scopes for scope in wanted)
+        if requirement == "any":
+            return any(scope in self.scopes for scope in wanted)
+        msg = f"Invalid requirement: {requirement!r}. Must be 'all' or 'any'"
+        raise ValueError(msg)

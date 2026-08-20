@@ -11,7 +11,7 @@ UV     ?= uv $(UV_OPTS)
 .EXPORT_ALL_VARIABLES:
 
 .PHONY: help install dev clean lint fmt test docs
-.PHONY: fmt-fix fmt-check type-check ruff ruff-check security
+.PHONY: fmt-fix fmt-check type-check ruff ruff-check security audit
 .PHONY: docs-serve docs-clean
 .PHONY: install-uv install-prek upgrade lock
 .PHONY: wt worktree wt-ls worktree-list wt-j worktree-jump worktree-prune
@@ -99,6 +99,14 @@ security: ## Run zizmor GitHub Actions security scanner
 	@echo "=> Running zizmor security scan on GitHub Actions workflows"
 	@uvx zizmor .github/workflows/
 
+audit: ## Run pip-audit against the locked dependencies (local interpreter only; CI matrixes both sides of uv.lock's marker split)
+	@echo "=> Auditing locked dependencies for known vulnerabilities"
+	@set -e
+	@trap 'rm -f requirements-audit.txt' EXIT
+	@$(UV) export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt > /dev/null
+	@uvx pip-audit -r requirements-audit.txt --desc
+	@rm -f requirements-audit.txt
+
 # =============================================================================
 # Testing
 # =============================================================================
@@ -134,7 +142,7 @@ test-failed: ## Re-run only failed tests from last run
 
 docs: docs-clean ## Build documentation
 	@echo "=> Building documentation"
-	@$(UV) sync --group docs
+	@$(UV) sync --group docs --locked
 	@$(UV) run sphinx-build -M html docs docs/_build/ -E -a -j auto --keep-going
 
 docs-serve: docs-clean ## Serve documentation with live reload

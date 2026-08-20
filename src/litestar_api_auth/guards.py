@@ -15,7 +15,8 @@ from litestar.connection import ASGIConnection
 from litestar.exceptions import NotAuthorizedException, PermissionDeniedException
 from litestar.handlers import BaseRouteHandler
 
-from litestar_api_auth.types import APIKeyInfo, ScopeRequirement
+from litestar_api_auth.backends.base import APIKeyInfo
+from litestar_api_auth.types import ScopeRequirement
 
 if TYPE_CHECKING:
     from litestar.types import Guard
@@ -41,7 +42,34 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
         The APIKeyInfo from request state.
 
     Raises:
-        NotAuthorizedException: If no API key is present in the request state.
+        NotAuthorizedException: If no API key is present in the request
+            state, or if the value present is not a valid, active,
+            non-expired ``APIKeyInfo`` (see Warning below).
+
+    Warning:
+        The returned struct is :class:`litestar_api_auth.backends.base.APIKeyInfo`,
+        which carries a ``key_hash`` field. ``APIKeyMiddleware`` redacts it to
+        an empty string before storing this object in request state, so the
+        real SHA-256 hash never reaches here -- but still avoid returning or
+        serializing this object directly from a route handler; pick the
+        specific fields you need (as in the example below) instead.
+
+        This function does not merely trust a truthy ``state["api_key"]``:
+        "api_key" is a generic, unnamespaced state key, so other in-process
+        middleware/dependencies/handlers could write something else to it.
+        This re-validates the object's type, that its ``is_active``/``scopes``
+        fields actually match the types ``APIKeyInfo`` declares (see
+        :attr:`APIKeyInfo.has_valid_types`), and its ``is_active``/``is_expired``
+        status, rather than assuming ``APIKeyMiddleware`` was the last writer.
+
+        This re-check is still against the request-scoped snapshot
+        ``APIKeyMiddleware`` stored, not a fresh backend lookup: ``is_active``
+        and ``scopes`` (checked by :func:`require_scope`/:func:`require_scopes`)
+        both reflect the backend record as of that middleware's single
+        ``backend.get()`` call for *this* request, not any revocation or
+        scope change that lands afterward. See "Revocation timing" on
+        :class:`APIKeyMiddleware <litestar_api_auth.middleware.APIKeyMiddleware>`
+        for the exact semantics.
 
     Example:
         >>> from litestar import get, Request
@@ -57,7 +85,12 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
     """
     api_key = connection.state.get("api_key")
 
-    if api_key is None:
+    if (
+        not isinstance(api_key, APIKeyInfo)
+        or not api_key.has_valid_types
+        or not api_key.is_active
+        or api_key.is_expired
+    ):
         raise NotAuthorizedException(
             detail="No API key found in request. Ensure APIKeyMiddleware is configured and a valid API key is provided."
         )
@@ -125,9 +158,7 @@ def require_scope(scope: str) -> Guard:
         key_info = get_api_key_info(connection)
 
         if not key_info.has_scope(scope):
-            raise PermissionDeniedException(
-                detail=f"API key lacks required scope: {scope}. Available scopes: {key_info.scopes}"
-            )
+            raise PermissionDeniedException(detail=f"API key lacks required scope: {scope}")
 
     return guard
 
@@ -186,12 +217,9 @@ def require_scopes(*scopes: str, match: ScopeRequirement = "all") -> Guard:
 
         if not key_info.has_scopes(scopes_list, requirement=match):
             if match == "all":
-                detail = f"API key lacks required scopes. Required: {scopes_list}, Available: {key_info.scopes}"
+                detail = f"API key lacks required scopes. Required: {scopes_list}"
             else:
-                detail = (
-                    f"API key lacks at least one required scope. "
-                    f"Required (any): {scopes_list}, Available: {key_info.scopes}"
-                )
+                detail = f"API key lacks at least one required scope. Required (any): {scopes_list}"
 
             raise PermissionDeniedException(detail=detail)
 

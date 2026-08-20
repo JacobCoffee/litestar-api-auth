@@ -6,81 +6,20 @@ following the pattern from litestar-storages.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
-import msgspec
+# ``APIKeyInfo`` used to be defined here as a second, near-duplicate struct
+# alongside ``types.APIKeyInfo`` (this one carried ``key_hash``, that one
+# carried ``prefix``), which meant backends/middleware/guards and the
+# publicly documented type were different classes that only agreed by duck
+# typing. There is now a single canonical struct in
+# ``litestar_api_auth.types``; it is re-exported here so that
+# ``from litestar_api_auth.backends.base import APIKeyInfo`` -- used by the
+# bundled backends, the middleware, the guards, and any third-party backend
+# written against this module -- keeps working unchanged.
+from litestar_api_auth.types import APIKeyInfo
 
 __all__ = ("APIKeyBackend", "APIKeyInfo")
-
-
-class APIKeyInfo(msgspec.Struct):
-    """Information about an API key stored in the backend.
-
-    This is a lightweight data structure containing only the metadata
-    about an API key, not the raw key itself.
-
-    Attributes:
-        key_id: Unique identifier for the key (UUID)
-        key_hash: Hashed version of the API key
-        name: Human-readable name for the key
-        scopes: List of permission scopes (e.g., ["read", "write"])
-        is_active: Whether the key is currently active
-        created_at: When the key was created
-        expires_at: When the key expires (None if no expiration)
-        last_used_at: When the key was last used (None if never used)
-        metadata: Additional custom metadata as key-value pairs
-    """
-
-    key_id: str
-    key_hash: str
-    name: str
-    scopes: list[str]
-    is_active: bool = True
-    created_at: datetime | None = None
-    expires_at: datetime | None = None
-    last_used_at: datetime | None = None
-    metadata: dict[str, Any] | None = None
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if the API key has expired.
-
-        Returns:
-            True if the key has an expiration date that has passed, False otherwise.
-        """
-        if self.expires_at is None:
-            return False
-        now = datetime.now(timezone.utc)
-        expires = self.expires_at
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        return now > expires
-
-    def has_scope(self, scope: str) -> bool:
-        """Check if the API key has a specific scope.
-
-        Args:
-            scope: The scope to check for.
-
-        Returns:
-            True if the key has the scope, False otherwise.
-        """
-        return scope in self.scopes
-
-    def has_scopes(self, scopes: list[str], *, requirement: str = "all") -> bool:
-        """Check if the API key has the required scopes.
-
-        Args:
-            scopes: List of scopes to check for.
-            requirement: Either "all" (must have all scopes) or "any" (must have at least one).
-
-        Returns:
-            True if the scope requirement is satisfied, False otherwise.
-        """
-        if requirement == "all":
-            return all(s in self.scopes for s in scopes)
-        return any(s in self.scopes for s in scopes)
 
 
 @runtime_checkable
@@ -185,13 +124,27 @@ class APIKeyBackend(Protocol):
         """
         ...
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
 
         This is called automatically when a key is used for authentication.
 
+        Returns the freshly written record when the key still exists, so a
+        caller (see ``APIKeyMiddleware.__call__``) can detect a revoke() or
+        an expiry shortened by an in-place update() that landed in the
+        narrow window between an earlier ``get()`` and this call, closing
+        that race for backends that support it. Returning ``None`` is
+        ambiguous by design -- it covers both "nothing further to report"
+        (e.g. a backend predating this return value) *and* "the record was
+        deleted concurrently" -- so callers must not treat a ``None`` return
+        as proof of deletion; a concurrent delete() in that same window is
+        not distinguishable this way and remains uncaught.
+
         Args:
             key_hash: SHA-256 hash of the API key
+
+        Returns:
+            The updated APIKeyInfo if the backend can provide one, None otherwise.
         """
         ...
 

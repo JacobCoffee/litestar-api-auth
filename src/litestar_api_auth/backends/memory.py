@@ -84,8 +84,21 @@ class MemoryBackend(APIKeyBackend):
             ValueError: If a key with the same hash or ID already exists
         """
         async with self._lock:
+            if info.key_hash != key_hash:
+                # The record must be retrievable by the same hash it is
+                # stored under: get_by_id() returns info.key_hash verbatim,
+                # and callers (e.g. revoke/delete) use that value to look the
+                # record back up. A mismatch here would create a key that
+                # authenticates via key_hash but can never be revoked or
+                # deleted through info.key_hash.
+                msg = "key_hash argument does not match info.key_hash"
+                raise ValueError(msg)
+
             if key_hash in self._store:
-                msg = f"API key with hash {key_hash} already exists"
+                # Do not interpolate key_hash into the message: it's the exact
+                # stored verifier used for backend lookups, and this
+                # exception can surface in debug-mode responses and logs.
+                msg = "API key with this hash already exists"
                 raise ValueError(msg)
 
             if info.key_id in self._id_index:
@@ -99,6 +112,7 @@ class MemoryBackend(APIKeyBackend):
                     key_hash=info.key_hash,
                     name=info.name,
                     scopes=info.scopes,
+                    prefix=info.prefix,
                     is_active=info.is_active,
                     created_at=datetime.now(timezone.utc),
                     expires_at=info.expires_at,
@@ -163,6 +177,7 @@ class MemoryBackend(APIKeyBackend):
                 key_hash=info.key_hash,
                 name=updates.get("name", info.name),  # type: ignore[arg-type]
                 scopes=updates.get("scopes", info.scopes),  # type: ignore[arg-type]
+                prefix=info.prefix,
                 is_active=updates.get("is_active", info.is_active),  # type: ignore[arg-type]
                 created_at=info.created_at,
                 expires_at=updates.get("expires_at", info.expires_at),  # type: ignore[arg-type]
@@ -235,13 +250,23 @@ class MemoryBackend(APIKeyBackend):
         result = await self.update(key_hash, is_active=False)
         return result is not None
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
+
+        Returns the freshly updated record when the key still exists, so
+        callers can detect a concurrent revoke() (or an expiry shortened by
+        a concurrent update()) that landed between their earlier get() and
+        this call -- see ``APIKeyBackend.update_last_used``. A ``None``
+        return is ambiguous: it also covers the key having been deleted
+        concurrently, which is therefore not distinguishable this way.
 
         Args:
             key_hash: SHA-256 hash of the API key
+
+        Returns:
+            The updated APIKeyInfo if found, None otherwise.
         """
-        await self.update(
+        return await self.update(
             key_hash,
             last_used_at=datetime.now(timezone.utc),
         )

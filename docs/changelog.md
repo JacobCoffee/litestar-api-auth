@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Nothing yet
+- `extract_key_id()` no longer derives its return value from the raw
+  characters of the API key's secret portion. It now returns the first 8
+  hex characters of the key's SHA-256 hash instead, so following the
+  function's own documented advice to log the identifier no longer leaks
+  key material. This changes the value `extract_key_id()` returns for
+  every existing key - any code that persisted or compared against the
+  previous raw-substring output must be updated.
 
 [Unreleased]: https://github.com/JacobCoffee/litestar-api-auth/compare/main...HEAD

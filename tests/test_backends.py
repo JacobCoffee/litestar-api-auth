@@ -67,6 +67,37 @@ class TestMemoryBackendCreate:
             await memory_backend.create(hashed_key, duplicate_info)
 
     @pytest.mark.asyncio
+    async def test_memory_backend_duplicate_hash_error_does_not_leak_hash(self, memory_backend: MemoryBackend) -> None:
+        """Duplicate-hash error must not embed the stored key_hash verifier.
+
+        The hash is the exact value backends use for lookups; leaking it in
+        an exception message (surfaced via debug-mode responses or logs)
+        would expose the stored credential unnecessarily.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await memory_backend.create(hashed_key, key_info)
+
+        duplicate_info = APIKeyInfo(
+            key_id="test-456",
+            key_hash=hashed_key,
+            name="Duplicate Key",
+            scopes=["write"],
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            await memory_backend.create(hashed_key, duplicate_info)
+
+        assert hashed_key not in str(exc_info.value)
+        assert str(exc_info.value) == "API key with this hash already exists"
+
+    @pytest.mark.asyncio
     async def test_memory_backend_create_duplicate_id(self, memory_backend: MemoryBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
         _raw_key1, hashed_key1 = generate_api_key("test_")
@@ -92,6 +123,37 @@ class TestMemoryBackendCreate:
 
         with pytest.raises(ValueError, match="already exists"):
             await memory_backend.create(hashed_key2, duplicate_info)
+
+    @pytest.mark.asyncio
+    async def test_memory_backend_create_rejects_mismatched_hash(self, memory_backend: MemoryBackend) -> None:
+        """create() must reject a key_hash argument that disagrees with info.key_hash.
+
+        Regression test for a revocation-integrity bug: the record used to be
+        stored under the ``key_hash`` argument while ``info.key_hash`` (a
+        different value) was preserved inside it. The key would then
+        authenticate via ``key_hash`` (used by get()/the auth middleware),
+        but get_by_id() -- used by the management controller's revoke/delete
+        endpoints -- would return a record whose key_hash pointed nowhere,
+        making the key permanently unrevokable and undeletable through the API.
+        """
+        _, hashed_key = generate_api_key("test_")
+        _, other_hashed_key = generate_api_key("test_")
+
+        mismatched_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=other_hashed_key,  # Does not match the key_hash argument below
+            name="Test Key",
+            scopes=["read"],
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            await memory_backend.create(hashed_key, mismatched_info)
+
+        # Neither hash should have been stored as a side effect of the
+        # rejected create() call.
+        assert await memory_backend.get(hashed_key) is None
+        assert await memory_backend.get(other_hashed_key) is None
+        assert await memory_backend.get_by_id("test-123") is None
 
     @pytest.mark.asyncio
     async def test_memory_backend_create_sets_created_at(self, memory_backend: MemoryBackend) -> None:
@@ -671,3 +733,99 @@ class TestMemoryBackendIntegration:
         # Verify all created
         keys = await memory_backend.list()
         assert len(keys) == 10
+
+
+class TestAPIKeyInfoHasScopes:
+    """Tests for ``APIKeyInfo.has_scopes`` (backends.base), covering requirement validation."""
+
+    def _key_info(self) -> APIKeyInfo:
+        return APIKeyInfo(
+            key_id="test-123",
+            key_hash="hash",
+            name="Test Key",
+            scopes=["read:users"],
+        )
+
+    def test_has_scopes_all_requirement(self) -> None:
+        """'all' still requires every scope to be present."""
+        key_info = self._key_info()
+        assert key_info.has_scopes(["read:users"], requirement="all") is True
+        assert key_info.has_scopes(["read:users", "write:users"], requirement="all") is False
+
+    def test_has_scopes_any_requirement(self) -> None:
+        """'any' still requires at least one scope to be present."""
+        key_info = self._key_info()
+        assert key_info.has_scopes(["read:users", "write:users"], requirement="any") is True
+        assert key_info.has_scopes(["write:users"], requirement="any") is False
+
+    def test_has_scopes_invalid_requirement_raises(self) -> None:
+        """An unrecognized requirement must raise instead of silently degrading to 'any'.
+
+        Regression test: previously a misspelled requirement value (e.g. a typo
+        of "all") fell through to the "any" branch, so a key holding only one of
+        several required scopes was granted access under an intended all-of check.
+        """
+        key_info = self._key_info()
+        with pytest.raises(ValueError, match="Invalid requirement"):
+            key_info.has_scopes(["read:users", "write:users"], requirement="bogus")
+
+
+class TestAPIKeyInfoHasValidTypes:
+    """Regression tests for ``APIKeyInfo.has_valid_types`` (backends.base).
+
+    ``msgspec.Struct`` does not type-check on direct construction, so a
+    custom/legacy backend, migrated or corrupted serialized data, or direct
+    programmatic seeding can produce an ``APIKeyInfo`` whose ``is_active`` is
+    a truthy non-``bool`` (e.g. the string ``"false"``) or whose ``scopes``
+    is a ``str`` instead of a ``list[str]``. Before ``has_valid_types``
+    existed, such a record would fail open: ``not "false"`` is ``False``, so
+    the active checks in ``APIKeyMiddleware._validate_api_key`` and
+    ``guards.get_api_key_info`` both passed, and ``"admin" in
+    "api_keys:admin"`` is a substring match rather than a membership check,
+    so ``has_scope``/``has_scopes`` did too.
+    """
+
+    def test_well_formed_record_is_valid(self) -> None:
+        """A normally constructed record must report as valid."""
+        key_info = APIKeyInfo(key_id="ok", key_hash="hash", name="OK", scopes=["read:users"], is_active=True)
+        assert key_info.has_valid_types is True
+
+    def test_string_is_active_is_invalid(self) -> None:
+        """A truthy non-bool ``is_active`` (e.g. the string "false") must be rejected.
+
+        Before the fix, ``not "false"`` evaluated to ``False``, so this record
+        would have passed every "is the key active" check downstream.
+        """
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes=["api_keys:admin"],
+            is_active="false",  # type: ignore[arg-type]
+        )
+        assert key_info.has_valid_types is False
+
+    def test_string_scopes_is_invalid(self) -> None:
+        """A ``scopes`` value that is a ``str`` instead of ``list[str]`` must be rejected.
+
+        Before the fix, ``"admin" in "api_keys:admin"`` was a substring match
+        (``True``), not a membership check, so ``has_scope("admin")`` would
+        have incorrectly granted a scope this key never held as a list member.
+        """
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes="api_keys:admin",  # type: ignore[arg-type]
+        )
+        assert key_info.has_valid_types is False
+
+    def test_non_string_scope_member_is_invalid(self) -> None:
+        """A scopes list containing a non-str member must also be rejected."""
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes=["read:users", 123],  # type: ignore[list-item]
+        )
+        assert key_info.has_valid_types is False

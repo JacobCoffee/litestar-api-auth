@@ -19,7 +19,7 @@ from advanced_alchemy.base import BigIntBase
 from advanced_alchemy.repository import SQLAlchemyAsyncRepository
 from advanced_alchemy.service import SQLAlchemyAsyncRepositoryService
 from advanced_alchemy.types import DateTimeUTC, JsonB
-from sqlalchemy import String
+from sqlalchemy import String, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from litestar_api_auth.backends.base import APIKeyInfo
@@ -154,12 +154,21 @@ class SQLAlchemyConfig:
         table_name: Name of the table to store API keys in.
         schema: Optional database schema name.
         create_tables: Whether to create tables on startup if they don't exist.
+        dispose_engine: Whether ``SQLAlchemyBackend.close()`` disposes the
+            engine (and its connection pool). Defaults to True, which suits an
+            engine created solely for this backend. Set False when handing in
+            an engine owned by the host application and shared with the rest of
+            it -- otherwise the plugin's shutdown hook (see
+            ``APIAuthPlugin._register_lifespan_handlers``, which calls
+            ``close()``) tears down connections that other parts of the app
+            still use.
     """
 
     engine: AsyncEngine | None = None
     table_name: str = "api_keys"
     schema: str | None = None
     create_tables: bool = True
+    dispose_engine: bool = True
 
 
 class SQLAlchemyBackend:
@@ -200,6 +209,33 @@ class SQLAlchemyBackend:
     Note:
         This backend requires the ``sqlalchemy`` optional dependency.
         Install with: ``pip install litestar-api-auth[sqlalchemy]``
+
+    Warning:
+        ``key_hash`` is bound as a SQL parameter on every ``create()``,
+        ``get()``, ``update()`` (and therefore ``revoke()`` /
+        ``update_last_used()``), and ``delete()`` call. SQLAlchemy engines
+        default to ``hide_parameters=False``, and this backend does not
+        modify the logging configuration of the engine you pass in -- so a
+        deployment that enables ``echo=True`` on ``create_async_engine()``,
+        or raises the ``sqlalchemy.engine.Engine`` logger to ``INFO`` for
+        debugging, writes the exact stored verifier for every key lookup,
+        and for every ``update_last_used()`` call (when ``track_usage`` is
+        enabled, the default), to its logs. Deployments that treat
+        ``key_hash`` as sensitive must construct their own engine with
+        ``hide_parameters=True`` and keep the effective
+        ``sqlalchemy.engine.Engine`` logger at ``WARNING`` or higher (i.e.
+        never enable ``INFO`` or ``DEBUG``) in any environment whose logs
+        are persisted or shipped to a log aggregator.
+
+        ``hide_parameters=True`` only redacts *bound statement parameters* --
+        it does not touch *result rows*. ``get()`` and ``get_by_id()`` select
+        the ``key_hash`` column back out of the table, so raising the engine
+        to ``echo="debug"`` (SQLAlchemy's row-level echo mode, stronger than
+        ``echo=True``) logs every fetched row -- ``key_hash`` included --
+        regardless of ``hide_parameters``. Treat ``echo="debug"`` the same as
+        ``echo=True``: never enable it, or the ``sqlalchemy.engine.Engine``
+        logger at ``DEBUG``, in any environment whose logs are persisted or
+        shipped to a log aggregator.
     """
 
     def __init__(self, config: SQLAlchemyConfig | None = None) -> None:
@@ -237,6 +273,11 @@ class SQLAlchemyBackend:
         """
         svc = APIKeyService(session=session)
         svc.repository.model_type = self._model
+        # The repository's __init__ already built `self.statement` from the
+        # class-level `model_type` (APIKeyModel) before the reassignment
+        # above took effect, so it must be rebuilt against the configured
+        # model or queries silently target the wrong table.
+        svc.repository.statement = select(self._model)
         return svc
 
     async def startup(self) -> None:
@@ -260,17 +301,27 @@ class SQLAlchemyBackend:
 
         Raises:
             ValueError: If a key with the same hash or ID already exists.
-            RuntimeError: If the engine is not configured.
+            RuntimeError: If the engine is not configured, or if the insert
+                fails due to a database error.
         """
         if self._sessionmaker is None:
             msg = "Engine is not configured. Set config.engine before calling create()."
             raise RuntimeError(msg)
 
-        from advanced_alchemy.exceptions import DuplicateKeyError
-        from sqlalchemy.exc import IntegrityError
+        from advanced_alchemy.exceptions import DuplicateKeyError, IntegrityError, RepositoryError
+        from sqlalchemy.exc import IntegrityError as SQLAlchemyIntegrityError
 
         created_at = info.created_at if info.created_at is not None else datetime.now(timezone.utc)
 
+        # `error_to_raise` is raised *after* this try/except/else, rather than
+        # from inside an `except` clause via `raise ... from None`: `from None`
+        # only sets `__suppress_context__` (which standard traceback formatting
+        # and Sentry's chain walker both honor), but leaves the caught exception
+        # -- and, through it, key_hash as a bound SQL parameter on `__cause__`
+        # -- reachable via `__context__` for anything that walks the raw
+        # exception graph. Raising once the handler has exited leaves
+        # `__context__` unset entirely, so there is nothing left to walk.
+        error_to_raise: ValueError | RuntimeError | None = None
         try:
             async with self._sessionmaker() as session:
                 svc = self._make_service(session)
@@ -288,17 +339,50 @@ class SQLAlchemyBackend:
                     },
                     auto_commit=True,
                 )
-                return _model_to_info(result)
         except (IntegrityError, DuplicateKeyError) as exc:
-            detail = str(exc).lower()
-            if "key_id" in detail:
-                msg = f"API key with ID {info.key_id} already exists"
-                raise ValueError(msg) from exc
-            if "key_hash" in detail:
-                msg = f"API key with hash {key_hash} already exists"
-                raise ValueError(msg) from exc
-            msg = "API key with the same hash or ID already exists"
-            raise ValueError(msg) from exc
+            # These are Advanced Alchemy's own exception classes, not
+            # SQLAlchemy's: ``APIKeyService.create`` wraps every underlying
+            # ``sqlalchemy.exc`` failure via ``wrap_sqlalchemy_exception``
+            # (``wrap_exceptions`` defaults to ``True`` and is never
+            # overridden here), so a raw ``sqlalchemy.exc.IntegrityError``
+            # never actually reaches this call site -- only the wrapped
+            # ``IntegrityError``/``DuplicateKeyError`` do, chained (``from
+            # exc``) to the original SQLAlchemy error as ``__cause__``.
+            #
+            # Crucially, that wrapper funnels *every* non-constraint
+            # ``StatementError`` (e.g. ``OperationalError`` from a dropped
+            # connection or lock timeout) into this same wrapped
+            # ``IntegrityError`` class -- it is not exclusive to genuine
+            # constraint violations. ``DuplicateKeyError`` is: Advanced
+            # Alchemy only raises it from the branch that already confirmed
+            # ``exc.__cause__`` is a real ``sqlalchemy.exc.IntegrityError``.
+            # So a bare ``IntegrityError`` must still check its cause's
+            # *type* (never its string contents -- that would risk
+            # rendering key_hash) to tell an actual constraint violation
+            # apart from a transient failure that only looks like one.
+            if isinstance(exc, DuplicateKeyError) or isinstance(exc.__cause__, SQLAlchemyIntegrityError):
+                detail = str(exc).lower()
+                if "key_id" in detail:
+                    error_to_raise = ValueError(f"API key with ID {info.key_id} already exists")
+                elif "key_hash" in detail:
+                    error_to_raise = ValueError("API key with this hash already exists")
+                else:
+                    error_to_raise = ValueError("API key with the same hash or ID already exists")
+            else:
+                error_to_raise = RuntimeError("Failed to create API key due to a database error")
+        except RepositoryError:
+            # Catches whatever ``wrap_sqlalchemy_exception`` wraps the
+            # remaining failure modes into (a non-``IntegrityError``
+            # ``InvalidRequestError``, or the catch-all ``RepositoryError``
+            # for a bare ``SQLAlchemyError``/``AttributeError``) --
+            # ``RepositoryError`` is the base of every class that wrapper
+            # raises, so this is the backstop for anything not already
+            # handled above.
+            error_to_raise = RuntimeError("Failed to create API key due to a database error")
+        else:
+            return _model_to_info(result)
+
+        raise error_to_raise
 
     async def get(self, key_hash: str) -> APIKeyInfo | None:
         """Retrieve an API key by its hash.
@@ -308,16 +392,45 @@ class SQLAlchemyBackend:
 
         Returns:
             The APIKeyInfo if found, None otherwise.
+
+        Raises:
+            RuntimeError: If the lookup fails due to a database error.
         """
         if self._sessionmaker is None:
             return None
 
-        async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+        from advanced_alchemy.exceptions import RepositoryError
+
+        # See the comment in create() on why the RuntimeError below is raised
+        # after this try/except/else instead of via `raise ... from None`
+        # inside the `except` clause: that only suppresses the chain from
+        # standard traceback formatting, it doesn't clear `__context__`.
+        error_to_raise: RuntimeError | None = None
+        try:
+            async with self._sessionmaker() as session:
+                svc = self._make_service(session)
+                model = await svc.get_one_or_none(self._model.key_hash == key_hash)
+        except RepositoryError:
+            # SQLAlchemy engines default to hide_parameters=False, and the
+            # engine is user-supplied so this library never sets it -- a
+            # StatementError/OperationalError here (e.g. a dropped
+            # connection or lock timeout) renders key_hash, the exact
+            # stored verifier used for this lookup, as a bound SQL
+            # parameter in str(exc). ``get_one_or_none`` never lets that raw
+            # SQLAlchemy exception escape, though: it wraps every failure via
+            # ``wrap_sqlalchemy_exception`` into an ``AdvancedAlchemyError``
+            # subclass (``wrap_exceptions`` defaults to ``True`` and is never
+            # overridden here), always chaining the original as
+            # ``__cause__``. Catching ``sqlalchemy.exc.StatementError`` alone
+            # would therefore never fire, and the hash would still reach a
+            # formatted traceback via that chain.
+            error_to_raise = RuntimeError("Failed to retrieve API key due to a database error")
+        else:
             if model is None:
                 return None
             return _model_to_info(model)
+
+        raise error_to_raise
 
     async def get_by_id(self, key_id: str) -> APIKeyInfo | None:
         """Retrieve an API key by its unique ID.
@@ -347,27 +460,117 @@ class SQLAlchemyBackend:
 
         Returns:
             The updated APIKeyInfo if found, None otherwise.
+
+        Raises:
+            RuntimeError: If the update fails due to a database error.
         """
         if self._sessionmaker is None:
             return None
 
+        from sqlalchemy import bindparam, case, or_
+        from sqlalchemy import update as sa_update
+        from sqlalchemy.exc import StatementError
+
+        # Map the "metadata" kwarg to the model's "metadata_" column
+        update_data: dict[str, Any] = {}
+        for field, value in updates.items():
+            if field == "metadata":
+                update_data["metadata_"] = value
+            else:
+                update_data[field] = value
+        # Never let a caller reassign the surrogate primary key through this
+        # generic field-update API -- key_hash is the only column that identifies
+        # which row gets written below.
+        update_data.pop("id", None)
+
+        # last_used_at must never move backward. update_last_used() captures
+        # datetime.now() before this UPDATE commits, so a slow request A can
+        # race a faster, later-timestamped request B: if B's UPDATE commits
+        # first, A's delayed UPDATE must not clobber B's newer value with its
+        # own stale one -- see RedisBackend.update() for the same race. The
+        # guard is expressed as a CASE inside the UPDATE's SET clause (rather
+        # than a read-compare-write) so the write stays a single
+        # UPDATE ... WHERE key_hash = :key_hash statement -- a read-then-write
+        # split would reintroduce the ABA race described below.
+        if "last_used_at" in update_data and update_data["last_used_at"] is not None:
+            # Bind `incoming` explicitly as the column's own DateTimeUTC type.
+            # Passing the bare Python datetime as the THEN value instead binds
+            # it as a plain, untyped literal -- silently skipping DateTimeUTC's
+            # UTC-normalizing bind processor for that one bind -- and the CASE
+            # expression's own result type then gets inferred from that
+            # untyped literal rather than from the compared column. A
+            # non-UTC-offset (but still tz-aware) timestamp would then be
+            # stored under its raw, un-normalized wall-clock value, defeating
+            # the very guard being added here.
+            incoming = bindparam("last_used_at_guard", update_data["last_used_at"], type_=self._model.last_used_at.type)
+            update_data["last_used_at"] = case(
+                (or_(self._model.last_used_at.is_(None), self._model.last_used_at < incoming), incoming),
+                else_=self._model.last_used_at,
+            )
+
+        if not update_data:
+            return await self.get(key_hash)
+
         async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
-            if model is None:
-                return None
+            # A single UPDATE ... WHERE key_hash = :key_hash keeps the write scoped
+            # to the row identified by key_hash. A get-then-write-by-id split here
+            # would be vulnerable to an ABA race: another key's row could be
+            # deleted and replaced by a row that reuses the same primary key
+            # (SQLite reuses rowids without AUTOINCREMENT) between the read and the
+            # write, silently mutating the replacement key instead of this one.
+            #
+            # `RETURNING` is deliberately not used here: MySQL supports it for
+            # neither UPDATE nor DELETE, and this backend targets PostgreSQL,
+            # MySQL, and SQLite alike. The row is re-read by that same key_hash
+            # (never by id) inside the same transaction instead -- but only once
+            # `rowcount` confirms the UPDATE actually matched a row. Skipping that
+            # check let a zero-match UPDATE (no row with this key_hash) fall
+            # through to the re-read anyway: under READ COMMITTED, a concurrent
+            # create() committing a row with this exact key_hash between the
+            # UPDATE and the SELECT would make the SELECT observe that unrelated,
+            # never-updated row as if it were this call's result -- e.g. letting
+            # revoke() report a key as deactivated when the UPDATE never touched
+            # it and it is still active.
+            # error_to_raise is raised after this try/except/else -- see the
+            # comment in create() on why: `raise ... from None` inside the
+            # `except` clause would only suppress the chain from standard
+            # traceback formatting, not clear `__context__` itself.
+            error_to_raise: RuntimeError | None = None
+            try:
+                result = await session.execute(
+                    sa_update(self._model).where(self._model.key_hash == key_hash).values(**update_data)
+                )
+                if result.rowcount == 0:
+                    await session.rollback()
+                    return None
+                model = await session.scalar(select(self._model).where(self._model.key_hash == key_hash))
+                if model is None:
+                    await session.rollback()
+                    return None
+                # commit() is inside this try, not in an `else` after it, so a
+                # commit-time failure (a dropped connection, lock timeout, or a
+                # deferred constraint firing at COMMIT) is caught by the same
+                # sanitizer below instead of escaping as a raw SQLAlchemy
+                # exception -- matching delete(), which commits inside its try
+                # for the same reason.
+                await session.commit()
+            except StatementError:
+                # The UPDATE and SELECT above bind key_hash as a SQL parameter.
+                # SQLAlchemy engines default to hide_parameters=False, and the
+                # engine is user-supplied so this library never sets it, so an
+                # unhandled StatementError/OperationalError here (e.g. a dropped
+                # connection or lock timeout) would put the exact stored
+                # verifier into a 500 response, logs, or an error reporter's
+                # captured traceback. commit() itself carries no bound
+                # parameters, but it must raise through this same sanitizer too
+                # (as delete()'s commit does) so every DB failure in this method
+                # -- not just the ones that happen to bind key_hash -- follows
+                # the same RuntimeError contract.
+                error_to_raise = RuntimeError("Failed to update API key due to a database error")
+            else:
+                return _model_to_info(model)
 
-            # Map the "metadata" kwarg to the model's "metadata_" column
-            update_data: dict[str, Any] = {}
-            for field, value in updates.items():
-                if field == "metadata":
-                    update_data["metadata_"] = value
-                else:
-                    update_data[field] = value
-
-            update_data["id"] = model.id
-            result = await svc.update(update_data, item_id=model.id, auto_commit=True)
-            return _model_to_info(result)
+            raise error_to_raise
 
     async def delete(self, key_hash: str) -> bool:
         """Delete an API key from the database.
@@ -377,17 +580,43 @@ class SQLAlchemyBackend:
 
         Returns:
             True if the key was deleted, False if not found.
+
+        Raises:
+            RuntimeError: If the delete fails due to a database error.
         """
         if self._sessionmaker is None:
             return False
 
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy.exc import StatementError
+
         async with self._sessionmaker() as session:
-            svc = self._make_service(session)
-            model = await svc.get_one_or_none(self._model.key_hash == key_hash)
-            if model is None:
-                return False
-            await svc.delete(model.id, auto_commit=True)
-            return True
+            # A single DELETE ... WHERE key_hash = :key_hash keeps the write scoped
+            # to the row identified by key_hash -- see the comment in update() for
+            # why a get-then-delete-by-id split is unsafe here, and why `RETURNING`
+            # is avoided. `rowcount` is enough to know whether a row matched: unlike
+            # an UPDATE whose new values might equal the old ones, a DELETE always
+            # reports the row it removed.
+            # error_to_raise is raised after this try/except/else -- see the
+            # comment in create() on why: `raise ... from None` inside the
+            # `except` clause would only suppress the chain from standard
+            # traceback formatting, not clear `__context__` itself.
+            error_to_raise: RuntimeError | None = None
+            try:
+                result = await session.execute(sa_delete(self._model).where(self._model.key_hash == key_hash))
+                await session.commit()
+            except StatementError:
+                # The DELETE above binds key_hash as a SQL parameter.
+                # SQLAlchemy engines default to hide_parameters=False, and
+                # the engine is user-supplied so this library never sets
+                # it, so an unhandled StatementError/OperationalError here
+                # would put the exact stored verifier into a 500 response,
+                # logs, or an error reporter's captured traceback.
+                error_to_raise = RuntimeError("Failed to delete API key due to a database error")
+            else:
+                return result.rowcount > 0
+
+            raise error_to_raise
 
     async def list(
         self,
@@ -441,20 +670,34 @@ class SQLAlchemyBackend:
         result = await self.update(key_hash, is_active=False)
         return result is not None
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
+
+        Returns the freshly updated record when the key still exists, so
+        callers can detect a concurrent revoke() (or an expiry shortened by
+        a concurrent update()) that landed between their earlier get() and
+        this call -- see ``APIKeyBackend.update_last_used``. A ``None``
+        return is ambiguous: it also covers the key having been deleted
+        concurrently, which is therefore not distinguishable this way.
 
         Args:
             key_hash: SHA-256 hash of the API key.
+
+        Returns:
+            The updated APIKeyInfo if found, None otherwise.
         """
-        await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
+        return await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
 
     async def close(self) -> None:
         """Close the backend and release database connections.
 
-        Disposes of the SQLAlchemy engine and its connection pool.
+        Disposes of the SQLAlchemy engine and its connection pool, unless
+        ``SQLAlchemyConfig.dispose_engine`` is False -- in which case the
+        engine is left untouched because the host application owns it and
+        other parts of that application may still be using it. This is a
+        no-op either way when no engine is configured.
         """
-        if self._engine is not None:
+        if self._engine is not None and self.config.dispose_engine:
             await self._engine.dispose()
 
     def __repr__(self) -> str:

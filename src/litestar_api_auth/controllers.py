@@ -7,7 +7,7 @@ revoking, and deleting API keys.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 import msgspec
 from litestar import Controller, delete, get, post
@@ -15,8 +15,19 @@ from litestar.params import Parameter
 from litestar.status_codes import HTTP_201_CREATED, HTTP_204_NO_CONTENT
 
 from litestar_api_auth.backends.base import APIKeyBackend
+from litestar_api_auth.guards import require_scope
+from litestar_api_auth.service import hash_api_key
+
+if TYPE_CHECKING:
+    from litestar.types import Guard
 
 __all__ = ["APIKeyController"]
+
+#: Scope required to use the key-management endpoints by default. Creating a
+#: key is a privileged operation (a caller who can create keys can mint
+#: arbitrary scopes for itself), so it must never be reachable by an
+#: unauthenticated caller or by a key that merely holds *some* scope.
+DEFAULT_MANAGEMENT_SCOPE = "api_keys:admin"
 
 
 class APIKeyController(Controller):
@@ -29,23 +40,40 @@ class APIKeyController(Controller):
     - DELETE /api-keys/{key_id} - Delete an API key
     - POST /api-keys/{key_id}/revoke - Revoke an API key
 
-    These routes are auto-registered when APIAuthConfig.auto_routes is True.
+    These routes require the ``api_keys:admin`` scope by default (see
+    ``guards`` below) whether registered automatically via
+    ``APIAuthConfig.auto_routes``/``management_guards`` or manually, since
+    creating a key is a privileged operation. Pass ``guards=[...]`` on a
+    subclass to use a different policy.
 
     Example:
         >>> from litestar import Litestar
+        >>> from litestar.di import Provide
+        >>> from litestar_api_auth import APIAuthConfig, APIAuthPlugin
         >>> from litestar_api_auth.controllers import APIKeyController
         >>> from litestar_api_auth.backends.memory import MemoryBackend
+        >>>
+        >>> backend = MemoryBackend()
         >>>
         >>> class MyController(APIKeyController):
         ...     path = "/api-keys"
         >>>
+        >>> # APIAuthPlugin still needs to be installed even when the
+        >>> # controller is registered manually (auto_routes=False) -- it is
+        >>> # what wires up APIKeyMiddleware, which is what actually
+        >>> # authenticates the caller that ``guards`` above checks. The
+        >>> # plugin's own dependency injection targets its auto-registered
+        >>> # controller, so a manually-registered one still needs its
+        >>> # ``backend`` parameter supplied explicitly, as below.
         >>> app = Litestar(
         ...     route_handlers=[MyController],
-        ...     dependencies={"backend": lambda: MemoryBackend()},
+        ...     dependencies={"backend": Provide(lambda: backend, sync_to_thread=False)},
+        ...     plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend, auto_routes=False))],
         ... )
     """
 
     path: ClassVar[str] = "/api-keys"  # type: ignore[misc]
+    guards: ClassVar[list[Guard]] = [require_scope(DEFAULT_MANAGEMENT_SCOPE)]  # type: ignore[misc]
     tags: ClassVar[list[str]] = ["API Keys"]  # type: ignore[misc]
 
     @post(
@@ -71,7 +99,6 @@ class APIKeyController(Controller):
             The plaintext API key is only returned in this response and cannot be
             retrieved again. Store it securely.
         """
-        import hashlib
         import secrets
 
         from litestar_api_auth.backends.base import APIKeyInfo
@@ -79,8 +106,9 @@ class APIKeyController(Controller):
         # Generate a random API key
         plaintext_key = f"{data.prefix or 'pyorg_'}{secrets.token_urlsafe(32)}"
 
-        # Hash the key for storage
-        key_hash = hashlib.sha256(plaintext_key.encode()).hexdigest()
+        # Hash the key for storage (reuses the canonical hashing scheme so
+        # this path can never drift from what the middleware verifies against)
+        key_hash = hash_api_key(plaintext_key)
 
         # Create the key in the backend
         key_info = APIKeyInfo(
@@ -95,7 +123,19 @@ class APIKeyController(Controller):
             metadata=data.metadata or {},
         )
 
-        created_key = await backend.create(key_hash, key_info)
+        try:
+            created_key = await backend.create(key_hash, key_info)
+        except BaseException:
+            # Scrub the raw key material from this frame before the error
+            # propagates. Without this, plaintext_key/key_hash/key_info stay
+            # live frame locals for as long as the exception's traceback is
+            # held, so a monitoring tool that captures frame locals on
+            # unhandled exceptions (e.g. Sentry's include_local_variables)
+            # could recover the plaintext bearer key straight out of the
+            # traceback -- this is the only place in the library where the
+            # *raw* key, not just its hash, is reachable that way.
+            plaintext_key = key_hash = key_info = None
+            raise
 
         return CreateAPIKeyResponse(
             key_id=created_key.key_id,
@@ -220,7 +260,10 @@ class APIKeyController(Controller):
             raise NotFoundException(detail=f"API key not found: {key_id}")
 
         # Revoke the key
-        await backend.revoke(key_info.key_hash)
+        revoked = await backend.revoke(key_info.key_hash)
+
+        if not revoked:
+            raise NotFoundException(detail=f"API key not found: {key_id}")
 
     @delete(
         "/{key_id:str}",

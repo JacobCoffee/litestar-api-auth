@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from litestar_api_auth.types import APIKeyInfo, APIKeyState
 
 
@@ -44,12 +42,18 @@ class TestAPIKeyInfo:
         assert key_info.expires_at is None
         assert key_info.last_used_at is None
         assert key_info.is_active is True  # Default value
-        assert key_info.metadata == {}  # Default value
+        assert key_info.metadata is None  # Default value
+        assert key_info.key_hash == ""  # Default value
 
-    def test_api_key_info_immutability(self, sample_api_key_info: APIKeyInfo) -> None:
-        """Test that APIKeyInfo is frozen and immutable."""
-        with pytest.raises(Exception):  # FrozenInstanceError or AttributeError
-            sample_api_key_info.name = "Modified Name"  # type: ignore[misc]
+    def test_api_key_info_is_mutable(self, sample_api_key_info: APIKeyInfo) -> None:
+        """The consolidated APIKeyInfo keeps the backend struct's mutability.
+
+        ``types.APIKeyInfo`` used to be a separate, frozen struct; it is now
+        the same class the backends and middleware use, which must stay
+        mutable for backends that assign to fields in place.
+        """
+        sample_api_key_info.name = "Modified Name"
+        assert sample_api_key_info.name == "Modified Name"
 
     def test_api_key_info_with_empty_metadata(self) -> None:
         """Test APIKeyInfo with empty metadata dictionary."""

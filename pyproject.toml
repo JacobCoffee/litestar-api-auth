@@ -1,6 +1,6 @@
 [build-system]
 build-backend = "uv_build"
-requires = ["uv_build>=0.9.11,<0.11.0"]
+requires = ["uv_build==0.9.11"]
 
 [dependency-groups]
 docs = [
@@ -26,7 +26,7 @@ test = [
     "aiosqlite>=0.19.0",
     "anyio>=4.0.0",
     "fakeredis>=2.20.0",
-    "pytest>=8.0.0",
+    "pytest>=9.0.3",  # PYSEC-2026-1845: vulnerable tmpdir handling, fixed in 9.0.3
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
     "pytest-sugar>=1.1.1",
@@ -63,7 +63,24 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "litestar>=2.0",
+    "litestar>=2.22.0",
+    # PYSEC-2026-2670: floor for the litestar-transitive `multipart` runtime
+    # dependency (see [tool.uv] constraint-dependencies below for why a
+    # constraint alone is insufficient to protect downstream consumers).
+    # Deliberately unbounded above (unlike the local `<2` constraint below):
+    # the `<2` cap there is this repo's own dev/test stability choice, not a
+    # security requirement, so it must not be forced on downstream consumers.
+    "multipart>=1.3.1",
+    # PYSEC-2026-2132: floor for the litestar-transitive `click` runtime
+    # dependency (an unconditional/base litestar dependency, not gated
+    # behind an extra).
+    "click>=8.3.3",
+    # PYSEC-2026-215: floor for the litestar-transitive `idna` runtime
+    # dependency (via anyio/httpx).
+    "idna>=3.15",
+    # PYSEC-2026-2987: floor for the litestar-transitive `pygments` runtime
+    # dependency (via rich).
+    "pygments>=2.20.0",
 ]
 description = "API Key Authentication for Litestar applications"
 keywords = [
@@ -84,7 +101,13 @@ all = [
     "litestar-api-auth[sqlalchemy,redis]",
 ]
 redis = ["redis>=5.0"]
-sqlalchemy = ["sqlalchemy>=2.0", "advanced-alchemy>=0.20.0"]
+sqlalchemy = [
+    "sqlalchemy>=2.0",
+    "advanced-alchemy>=0.20.0",
+    # PYSEC-2026-2617 (also PYSEC-2026-88): floor for the alembic-transitive
+    # `mako` runtime dependency pulled in by this extra.
+    "mako>=1.3.12",
+]
 
 [project.urls]
 Changelog = "https://github.com/JacobCoffee/litestar-api-auth/releases/"
@@ -308,6 +331,7 @@ max-complexity = 12
     "C901",     # too-complex (plugin setup is inherently complex)
     "TC001",    # move-import (runtime needed for type hints in dependency injection)
     "TC002",    # move-import (lazy import intentional)
+    "ANN401",   # any-type (lifespan hook accepts either a sync or async callable, with or without args)
 ]
 "src/litestar_api_auth/service.py" = [
     "PLR2004",  # magic-value (8 chars is a known constant)
@@ -369,4 +393,59 @@ exclude = [
 ]
 
 [tool.uv]
+constraint-dependencies = [
+    # PYSEC-2026-2670: ReDoS in multipart <1.3.1. multipart is a transitive
+    # dependency via litestar, and litestar>=2.22.0 still allows
+    # multipart>=1.2.0, so this constraint keeps a relock from reintroducing
+    # the vulnerable version in this repo's own lock/dev environment. The
+    # floor that also protects downstream consumers is the mirrored entry in
+    # [project.dependencies] above (constraint-dependencies alone is not
+    # published in this package's metadata). Capped below 2.0 so this
+    # security floor doesn't also silently pull in multipart 2.0's unrelated
+    # parser behavior changes (bytes-vs-bytearray chunks, stricter boundary
+    # checks).
+    "multipart>=1.3.1,<2",
+    # PYSEC-2026-249: starlette <1.3.1 silently ignores request.form()'s
+    # max_fields/max_part_size limits for application/x-www-form-urlencoded
+    # bodies (enforced only for multipart/form-data), letting an
+    # unauthenticated request bypass configured resource limits (DoS).
+    # starlette is a transitive dependency of the docs group's
+    # sphinx-autobuild (not a runtime dependency of this library), but a
+    # relock could still land on a vulnerable pre-1.3.1 release without this
+    # floor.
+    "starlette>=1.3.1",
+    # PYSEC-2026-2275: requests <2.33.0 has a predictable-filename/insecure
+    # temp-file-reuse flaw in extract_zipped_paths() (also covers the earlier
+    # PYSEC-2026-1872 .netrc credential leak, fixed in 2.32.4, and
+    # PYSEC-2026-1873 Session object not re-verifying after an initial
+    # verify=False request, fixed in 2.32.0). requests is a transitive
+    # dependency via the docs group's sphinx, so this constraint keeps a
+    # relock from reintroducing a vulnerable release.
+    "requests>=2.33.0",
+    # PYSEC-2026-2132: click <8.3.3. click is an unconditional transitive
+    # runtime dependency of litestar itself (not gated behind an extra), so
+    # it ships to every consumer of this library, not just the dev/docs
+    # environment. Mirrored in [project.dependencies] above so the floor is
+    # also published in this package's own metadata, not just enforced in
+    # this repo's lock file.
+    "click>=8.3.3",
+    # PYSEC-2026-215: idna <3.15. idna is a transitive runtime dependency
+    # via anyio/httpx (used by litestar), so it ships to every consumer of
+    # this library. Mirrored in [project.dependencies] above so the floor
+    # is also published in this package's own metadata.
+    "idna>=3.15",
+    # PYSEC-2026-2987: ReDoS in pygments <2.20.0. pygments is a transitive
+    # runtime dependency via rich (used by litestar), so it ships to every
+    # consumer of this library. Mirrored in [project.dependencies] above so
+    # the floor is also published in this package's own metadata.
+    "pygments>=2.20.0",
+    # PYSEC-2026-2617 (also covers PYSEC-2026-88): mako <1.3.12. mako is a
+    # transitive dependency via alembic, pulled in by advanced-alchemy's
+    # `sqlalchemy` optional extra, so it ships as a runtime dependency to
+    # any consumer installing `litestar-api-auth[sqlalchemy]`. Mirrored in
+    # the `sqlalchemy` optional-dependencies extra above so the floor is
+    # also published in this package's own metadata, not just enforced in
+    # this repo's lock file.
+    "mako>=1.3.12",
+]
 default-groups = ["dev"]
