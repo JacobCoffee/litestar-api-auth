@@ -840,15 +840,30 @@ class TestExcludePaths:
 
     @pytest.mark.integration
     async def test_default_exclude_paths_still_exclude_actual_schema_and_health_routes(
-        self, seeded_backend: MemoryBackend
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
     ) -> None:
         """Anchoring the defaults must not regress their original purpose.
 
         The literal ``/health`` path, and the OpenAPI schema routes Litestar
         registers under ``/schema`` (e.g. ``/schema/openapi.json``), must
-        remain excluded -- with no API key at all -- since that's the whole
-        point of shipping these two paths as defaults.
+        remain excluded -- since that's the whole point of shipping these
+        two paths as defaults. A bare 200 response isn't proof of that (an
+        unguarded route returns 200 whether or not the middleware ran), so --
+        mirroring ``test_excluded_path_skips_backend_lookup`` above -- this
+        asserts the backend is never even consulted for these paths, despite
+        a valid key being sent on every request.
         """
+        raw_key, _, _ = test_api_key
+
+        get_calls = 0
+        original_get = seeded_backend.get
+
+        async def counting_get(key_hash: str) -> APIKeyInfo | None:
+            nonlocal get_calls
+            get_calls += 1
+            return await original_get(key_hash)
+
+        seeded_backend.get = counting_get  # type: ignore[method-assign]
 
         @get("/health")
         async def health_route() -> dict:
@@ -867,11 +882,12 @@ class TestExcludePaths:
         )
 
         with TestClient(app) as client:
-            health_response = client.get("/health")
-            schema_response = client.get("/schema/openapi.json")
+            health_response = client.get("/health", headers={"X-API-Key": raw_key})
+            schema_response = client.get("/schema/openapi.json", headers={"X-API-Key": raw_key})
 
         assert health_response.status_code == 200
         assert schema_response.status_code == 200
+        assert get_calls == 0
 
 
 class TestScopeGuardsIntegration:
