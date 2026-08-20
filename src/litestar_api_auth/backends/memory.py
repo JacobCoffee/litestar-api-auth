@@ -112,6 +112,7 @@ class MemoryBackend(APIKeyBackend):
                     key_hash=info.key_hash,
                     name=info.name,
                     scopes=info.scopes,
+                    prefix=info.prefix,
                     is_active=info.is_active,
                     created_at=datetime.now(timezone.utc),
                     expires_at=info.expires_at,
@@ -176,6 +177,7 @@ class MemoryBackend(APIKeyBackend):
                 key_hash=info.key_hash,
                 name=updates.get("name", info.name),  # type: ignore[arg-type]
                 scopes=updates.get("scopes", info.scopes),  # type: ignore[arg-type]
+                prefix=info.prefix,
                 is_active=updates.get("is_active", info.is_active),  # type: ignore[arg-type]
                 created_at=info.created_at,
                 expires_at=updates.get("expires_at", info.expires_at),  # type: ignore[arg-type]

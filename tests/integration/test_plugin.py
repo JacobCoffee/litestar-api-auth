@@ -1415,3 +1415,199 @@ class TestAutoRoutesDoNotClobberAppLevelBackendDependency:
             )
 
         assert response.status_code == 201
+
+
+class TestAuthSchemeWiring:
+    """Tests that ``APIAuthConfig.auth_scheme`` reaches the middleware.
+
+    The plugin builds its ``DefineMiddleware`` by hand, so a config option
+    that is never passed through silently does nothing -- these tests go
+    through a real app to pin the wiring, not just the middleware's own
+    parsing (covered in ``tests/unit/test_middleware.py``).
+    """
+
+    @pytest.mark.integration
+    async def test_bearer_scheme_authenticates_through_the_app(self, backend: MemoryBackend) -> None:
+        """``Authorization: Bearer <key>`` must authenticate end to end."""
+
+        @get("/protected", guards=[require_api_key])
+        async def protected_route() -> dict:
+            return {"status": "ok"}
+
+        raw_key, hashed_key = generate_api_key(prefix="test_")
+        await backend.create(
+            hashed_key,
+            APIKeyInfo(key_id="bearer-key", key_hash=hashed_key, name="Bearer Key", scopes=["read:users"]),
+        )
+
+        app = Litestar(
+            route_handlers=[protected_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        header_name="Authorization",
+                        auth_scheme="Bearer",
+                        auto_routes=False,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app=app) as client:
+            assert client.get("/protected", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 200
+            # The bare key, with no scheme prefix, must not authenticate.
+            assert client.get("/protected", headers={"Authorization": raw_key}).status_code == 401
+            # Another scheme's credential in the same header must not either.
+            assert client.get("/protected", headers={"Authorization": f"Basic {raw_key}"}).status_code == 401
+
+    @pytest.mark.integration
+    async def test_default_config_keeps_x_api_key_behavior(self, backend: MemoryBackend) -> None:
+        """With no ``auth_scheme``, the whole header value stays the key."""
+
+        @get("/protected", guards=[require_api_key])
+        async def protected_route() -> dict:
+            return {"status": "ok"}
+
+        raw_key, hashed_key = generate_api_key(prefix="test_")
+        await backend.create(
+            hashed_key,
+            APIKeyInfo(key_id="plain-key", key_hash=hashed_key, name="Plain Key", scopes=["read:users"]),
+        )
+
+        app = Litestar(
+            route_handlers=[protected_route],
+            plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend, auto_routes=False))],
+        )
+
+        with TestClient(app=app) as client:
+            assert client.get("/protected", headers={"X-API-Key": raw_key}).status_code == 200
+            assert client.get("/protected", headers={"X-API-Key": f"Bearer {raw_key}"}).status_code == 401
+
+
+class TestOpenAPISchemeShape:
+    """Tests for the OpenAPI security scheme and the global-requirement opt-in."""
+
+    @pytest.mark.integration
+    async def test_api_key_scheme_by_default(self, backend: MemoryBackend) -> None:
+        """Without ``auth_scheme``, the scheme is ``apiKey`` in the header."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend, header_name="X-API-Key"))],
+        )
+
+        scheme = app.openapi_schema.to_schema()["components"]["securitySchemes"]["APIKeyAuth"]
+
+        assert scheme["type"] == "apiKey"
+        assert scheme["name"] == "X-API-Key"
+        assert scheme["in"] == "header"
+
+    @pytest.mark.integration
+    async def test_bearer_scheme_is_documented_as_http_bearer(self, backend: MemoryBackend) -> None:
+        """With ``auth_scheme="Bearer"``, the scheme must be HTTP bearer.
+
+        Documenting an ``Authorization: Bearer <key>`` setup as
+        ``type="apiKey", name="Authorization"`` would make generated clients
+        send the bare key with no scheme prefix -- which the middleware then
+        ignores.
+        """
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        header_name="Authorization",
+                        auth_scheme="Bearer",
+                    )
+                )
+            ],
+        )
+
+        scheme = app.openapi_schema.to_schema()["components"]["securitySchemes"]["APIKeyAuth"]
+
+        assert scheme["type"] == "http"
+        assert scheme["scheme"] == "bearer"
+        assert "name" not in scheme
+        assert "in" not in scheme
+
+    @pytest.mark.integration
+    async def test_global_security_is_opt_in(self, backend: MemoryBackend) -> None:
+        """``openapi_global_security=True`` adds a document-wide requirement."""
+
+        @get("/public")
+        async def public_route() -> dict:
+            return {"message": "public"}
+
+        app = Litestar(
+            route_handlers=[public_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        openapi_global_security=True,
+                    )
+                )
+            ],
+        )
+
+        schema = app.openapi_schema.to_schema()
+
+        assert schema["security"] == [{"APIKeyAuth": []}]
+
+    @pytest.mark.integration
+    async def test_global_security_defaults_to_off(self, backend: MemoryBackend) -> None:
+        """The default must not stamp every documented route as key-authed."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend))],
+        )
+
+        schema = app.openapi_schema.to_schema()
+
+        assert schema.get("security") in (None, [])
+
+    @pytest.mark.integration
+    async def test_global_security_does_not_leak_into_other_apps(self, backend: MemoryBackend) -> None:
+        """One app's global requirement must not appear in an unrelated app.
+
+        Litestar hands every app that doesn't supply its own ``openapi_config``
+        the *same* module-level ``DEFAULT_OPENAPI_CONFIG`` instance, so
+        mutating it in place would stamp every other Litestar app in the
+        process too.
+        """
+        Litestar(
+            route_handlers=[],
+            plugins=[APIAuthPlugin(config=APIAuthConfig(backend=backend, openapi_global_security=True))],
+        )
+
+        other = Litestar(
+            route_handlers=[],
+            plugins=[APIAuthPlugin(config=APIAuthConfig(backend=MemoryBackend()))],
+        )
+        untouched = Litestar(route_handlers=[])
+
+        assert other.openapi_schema.to_schema().get("security") in (None, [])
+        assert untouched.openapi_schema.to_schema().get("security") in (None, [])
+        assert "securitySchemes" not in untouched.openapi_schema.to_schema().get("components", {})
+
+    @pytest.mark.integration
+    async def test_non_bearer_scheme_uses_that_scheme_name(self, backend: MemoryBackend) -> None:
+        """An arbitrary scheme is documented as itself, not hardcoded to bearer."""
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        header_name="Authorization",
+                        auth_scheme="Token",
+                    )
+                )
+            ],
+        )
+
+        scheme = app.openapi_schema.to_schema()["components"]["securitySchemes"]["APIKeyAuth"]
+
+        assert scheme["type"] == "http"
+        assert scheme["scheme"] == "token"

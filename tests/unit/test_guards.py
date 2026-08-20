@@ -41,21 +41,30 @@ class TestGetApiKeyInfoAnnotation:
     """Regression tests: guards must annotate the type the middleware
     actually stores in ``request.state.api_key``.
 
-    ``APIKeyMiddleware`` (middleware.py) only ever stores
-    ``backends.base.APIKeyInfo`` -- the mutable struct that carries
-    ``key_hash`` -- in ``scope["state"]["api_key"]``. Before this fix,
-    ``guards.py`` imported and annotated the unrelated, frozen
-    ``types.APIKeyInfo`` (which has no ``key_hash`` field) instead. Code
-    written against that annotation would have no static indication that
-    the real object carries a secret hash, risking accidental disclosure
-    if such an object were ever serialized, and would also be checking
-    the wrong struct's shape for `is_active`/`is_expired`.
+    ``APIKeyMiddleware`` (middleware.py) only ever stores the canonical
+    ``APIKeyInfo`` -- the mutable struct that carries ``key_hash`` -- in
+    ``scope["state"]["api_key"]``. Before this fix, ``guards.py`` imported
+    and annotated the unrelated, frozen ``types.APIKeyInfo`` (which had no
+    ``key_hash`` field) instead. Code written against that annotation would
+    have no static indication that the real object carries a secret hash,
+    risking accidental disclosure if such an object were ever serialized,
+    and would also be checking the wrong struct's shape for
+    ``is_active``/``is_expired``.
+
+    The two structs have since been consolidated into one class, so this now
+    also pins that consolidation: ``backends.base.APIKeyInfo`` and
+    ``types.APIKeyInfo`` must remain the *same* object, or the annotation
+    could silently drift apart from the runtime type again.
     """
 
-    def test_guards_module_imports_backend_api_key_info(self) -> None:
-        """``guards.APIKeyInfo`` must be the backend struct, not the public one."""
+    def test_public_and_backend_api_key_info_are_the_same_class(self) -> None:
+        """The two historical import paths must resolve to one canonical class."""
+        assert BackendAPIKeyInfo is PublicAPIKeyInfo
+
+    def test_guards_module_imports_canonical_api_key_info(self) -> None:
+        """``guards.APIKeyInfo`` must be the canonical struct."""
         assert guards.APIKeyInfo is BackendAPIKeyInfo
-        assert guards.APIKeyInfo is not PublicAPIKeyInfo
+        assert guards.APIKeyInfo is PublicAPIKeyInfo
 
     def test_get_api_key_info_return_annotation_matches_runtime_type(self) -> None:
         """The declared return type of ``get_api_key_info`` must match what

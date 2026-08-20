@@ -6,115 +6,20 @@ following the pattern from litestar-storages.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Protocol, runtime_checkable
 
-import msgspec
+# ``APIKeyInfo`` used to be defined here as a second, near-duplicate struct
+# alongside ``types.APIKeyInfo`` (this one carried ``key_hash``, that one
+# carried ``prefix``), which meant backends/middleware/guards and the
+# publicly documented type were different classes that only agreed by duck
+# typing. There is now a single canonical struct in
+# ``litestar_api_auth.types``; it is re-exported here so that
+# ``from litestar_api_auth.backends.base import APIKeyInfo`` -- used by the
+# bundled backends, the middleware, the guards, and any third-party backend
+# written against this module -- keeps working unchanged.
+from litestar_api_auth.types import APIKeyInfo
 
 __all__ = ("APIKeyBackend", "APIKeyInfo")
-
-
-class APIKeyInfo(msgspec.Struct):
-    """Information about an API key stored in the backend.
-
-    This is a lightweight data structure containing only the metadata
-    about an API key, not the raw key itself.
-
-    Attributes:
-        key_id: Unique identifier for the key (UUID)
-        key_hash: Hashed version of the API key
-        name: Human-readable name for the key
-        scopes: List of permission scopes (e.g., ["read", "write"])
-        is_active: Whether the key is currently active
-        created_at: When the key was created
-        expires_at: When the key expires (None if no expiration)
-        last_used_at: When the key was last used (None if never used)
-        metadata: Additional custom metadata as key-value pairs
-    """
-
-    key_id: str
-    key_hash: str
-    name: str
-    scopes: list[str]
-    is_active: bool = True
-    created_at: datetime | None = None
-    expires_at: datetime | None = None
-    last_used_at: datetime | None = None
-    metadata: dict[str, Any] | None = None
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if the API key has expired.
-
-        Returns:
-            True if the key has an expiration date that has passed, False otherwise.
-        """
-        if self.expires_at is None:
-            return False
-        now = datetime.now(timezone.utc)
-        expires = self.expires_at
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        return now > expires
-
-    @property
-    def has_valid_types(self) -> bool:
-        """Whether ``is_active`` and ``scopes`` actually match the types this class declares.
-
-        ``msgspec.Struct`` does not enforce field types when a struct is built
-        directly in Python (only decoding via ``msgspec.json.decode``/
-        ``msgspec.convert`` does), so a custom/legacy backend, migrated or
-        corrupted serialized data, or direct programmatic seeding can produce
-        a record whose ``is_active`` is a truthy non-``bool`` (e.g. the string
-        ``"false"``) or whose ``scopes`` is a ``str`` instead of a
-        ``list[str]``. Both would silently fail open for a caller that trusts
-        this record without checking this property first: ``not "false"`` is
-        ``False``, so the "is the key active" checks in
-        ``APIKeyMiddleware._validate_api_key`` and ``guards.get_api_key_info``
-        would both pass, and ``"admin" in "api_keys:admin"`` is a substring
-        match rather than a membership check, so ``has_scope``/``has_scopes``
-        would too.
-
-        Returns:
-            True if ``is_active`` is actually a ``bool`` and ``scopes`` is
-            actually a ``list`` of ``str``, False otherwise.
-        """
-        return (
-            isinstance(self.is_active, bool)
-            and isinstance(self.scopes, list)
-            and all(isinstance(s, str) for s in self.scopes)
-        )
-
-    def has_scope(self, scope: str) -> bool:
-        """Check if the API key has a specific scope.
-
-        Args:
-            scope: The scope to check for.
-
-        Returns:
-            True if the key has the scope, False otherwise.
-        """
-        return scope in self.scopes
-
-    def has_scopes(self, scopes: list[str], *, requirement: str = "all") -> bool:
-        """Check if the API key has the required scopes.
-
-        Args:
-            scopes: List of scopes to check for.
-            requirement: Either "all" (must have all scopes) or "any" (must have at least one).
-
-        Returns:
-            True if the scope requirement is satisfied, False otherwise.
-
-        Raises:
-            ValueError: If requirement is not "all" or "any".
-        """
-        if requirement == "all":
-            return all(s in self.scopes for s in scopes)
-        if requirement == "any":
-            return any(s in self.scopes for s in scopes)
-        msg = f"Invalid requirement: {requirement!r}. Must be 'all' or 'any'"
-        raise ValueError(msg)
 
 
 @runtime_checkable

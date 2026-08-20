@@ -25,7 +25,7 @@ Quick Navigation
 
 **Types**
 
-* :class:`~litestar_api_auth.types.APIKeyInfo` - API key metadata container
+* :class:`~litestar_api_auth.types.APIKeyInfo` - API key metadata container (the canonical struct; :class:`~litestar_api_auth.backends.base.APIKeyInfo` is the same class)
 * :class:`~litestar_api_auth.types.APIKeyState` - Key state enumeration (active, expired, revoked)
 
 **Schemas (msgspec)**
@@ -39,7 +39,7 @@ Quick Navigation
 **Storage Backends**
 
 * :class:`~litestar_api_auth.backends.base.APIKeyBackend` - Backend protocol
-* :class:`~litestar_api_auth.backends.base.APIKeyInfo` - Backend key info
+* :class:`~litestar_api_auth.backends.base.APIKeyInfo` - Backend key info (re-export of :class:`~litestar_api_auth.types.APIKeyInfo`)
 * :class:`~litestar_api_auth.backends.memory.MemoryBackend` - In-memory (testing/development)
 * :class:`~litestar_api_auth.backends.sqlalchemy.SQLAlchemyBackend` - SQLAlchemy backend
 * :class:`~litestar_api_auth.backends.sqlalchemy.APIKeyModel` - SQLAlchemy ORM model (Advanced Alchemy)
@@ -49,6 +49,7 @@ Quick Navigation
 
 **Service Functions**
 
+* :func:`~litestar_api_auth.service.mint_api_key` - Generate a key and persist it to a backend
 * :func:`~litestar_api_auth.service.generate_api_key` - Generate a new API key
 * :func:`~litestar_api_auth.service.hash_api_key` - Hash an API key for storage
 * :func:`~litestar_api_auth.service.verify_api_key` - Verify a key against its hash

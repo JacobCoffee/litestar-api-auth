@@ -10,12 +10,19 @@ import base64
 import hashlib
 import hmac
 import secrets
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from litestar_api_auth.exceptions import InvalidAPIKeyError
+from litestar_api_auth.types import APIKeyInfo
+
+if TYPE_CHECKING:
+    from litestar_api_auth.backends.base import APIKeyBackend
 
 __all__ = [
     "generate_api_key",
     "hash_api_key",
+    "mint_api_key",
     "verify_api_key",
     "extract_key_id",
 ]
@@ -69,6 +76,96 @@ def generate_api_key(prefix: str = "pyorg_") -> tuple[str, str]:
     hashed_key = hash_api_key(raw_key)
 
     return raw_key, hashed_key
+
+
+async def mint_api_key(
+    backend: APIKeyBackend,
+    *,
+    name: str,
+    scopes: list[str],
+    prefix: str,
+    expires_at: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[str, APIKeyInfo]:
+    """Generate an API key, persist it to a backend, and return both halves.
+
+    This is the one call a "mint an API key" flow needs: it generates the key
+    with :func:`generate_api_key`, builds the :class:`APIKeyInfo` record
+    (including a fresh ``key_id``), writes it through ``backend.create()``,
+    and hands back the plaintext key together with the stored record. Host
+    applications should not assemble the hash or the struct by hand -- doing
+    so is how a caller ends up hashing with a different scheme than the
+    middleware verifies against.
+
+    Args:
+        backend: The storage backend to persist the key in.
+        name: Human-readable name for the key.
+        scopes: Permission scopes to grant the key.
+        prefix: Prefix for the generated key (e.g. ``"pyorg_"``). Typically
+            ``APIAuthConfig.key_prefix``.
+        expires_at: Optional expiration timestamp. None means no expiration.
+        metadata: Optional additional metadata to store with the key.
+
+    Returns:
+        A tuple of ``(plaintext_key, info)``:
+            - ``plaintext_key``: the full key, to be shown to the user exactly
+              once. It cannot be recovered afterwards.
+            - ``info``: the record as returned by the backend (its ``key_hash``
+              is the stored verifier, so treat it as sensitive -- do not return
+              it to an HTTP client without redacting that field).
+
+    Example:
+        >>> plaintext, info = await mint_api_key(
+        ...     backend,
+        ...     name="Reporting job",
+        ...     scopes=["reports:read"],
+        ...     prefix="pycon_",
+        ... )
+
+    Security:
+        The plaintext key is only ever returned here; only ``info.key_hash``
+        is persisted. If ``backend.create()`` raises, the plaintext key and
+        its hash are scrubbed from this frame first, so a monitoring tool
+        that captures frame locals on unhandled exceptions (e.g. Sentry's
+        ``include_local_variables``) cannot recover them from the traceback --
+        mirroring ``APIKeyController.create_api_key``.
+    """
+    plaintext_key, key_hash = generate_api_key(prefix)
+
+    info = APIKeyInfo(
+        key_id=secrets.token_urlsafe(16),
+        name=name,
+        scopes=list(scopes),
+        key_hash=key_hash,
+        prefix=prefix,
+        is_active=True,
+        created_at=datetime.now(timezone.utc),
+        expires_at=expires_at,
+        last_used_at=None,
+        metadata=metadata,
+    )
+
+    try:
+        created = await backend.create(key_hash, info)
+    except BaseException:
+        plaintext_key = key_hash = ""
+        info = None  # type: ignore[assignment]
+        raise
+
+    # A backend is allowed to return its own record from create() (with
+    # backend-generated fields populated); fall back to the record we built
+    # if it returns nothing useful.
+    if created is None:
+        return plaintext_key, info
+
+    # ``prefix`` is informational and the bundled persistent backends have no
+    # column/field for it, so their returned record drops it. Restore it so
+    # the caller always gets back the prefix it asked for, whichever backend
+    # is in use.
+    if created.prefix is None:
+        created.prefix = info.prefix
+
+    return plaintext_key, created
 
 
 def hash_api_key(key: str) -> str:

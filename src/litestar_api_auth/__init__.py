@@ -67,6 +67,7 @@ from litestar_api_auth.service import (
     extract_key_id,
     generate_api_key,
     hash_api_key,
+    mint_api_key,
     verify_api_key,
 )
 
@@ -100,6 +101,7 @@ __all__ = [
     "extract_key_id",
     "generate_api_key",
     "hash_api_key",
+    "mint_api_key",
     "verify_api_key",
     # Types
     "APIKeyInfo",

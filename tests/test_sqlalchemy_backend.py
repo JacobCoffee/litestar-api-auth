@@ -23,7 +23,7 @@ from sqlalchemy.pool import StaticPool
 
 from litestar_api_auth.backends.base import APIKeyInfo
 from litestar_api_auth.backends.sqlalchemy import APIKeyModel, APIKeyService, SQLAlchemyBackend, SQLAlchemyConfig
-from litestar_api_auth.service import generate_api_key
+from litestar_api_auth.service import generate_api_key, hash_api_key, mint_api_key
 
 
 def _patch_second_execute_to_reuse_id(
@@ -1391,6 +1391,49 @@ class TestSQLAlchemyBackendClose:
 
         # Engine should be disposed; the pool is invalidated
 
+    async def test_close_disposes_engine_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``close()`` disposes the engine when ``dispose_engine`` is left at its default."""
+        engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
+        disposed: list[object] = []
+
+        async def _record_dispose(self: object, close: bool = True) -> None:
+            disposed.append(self)
+
+        monkeypatch.setattr(type(engine), "dispose", _record_dispose)
+
+        backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine))
+        await backend.close()
+
+        assert disposed == [engine]
+
+    async def test_close_leaves_externally_owned_engine_alone(self) -> None:
+        """``dispose_engine=False`` must keep a host-owned shared engine usable.
+
+        A host app that hands in an engine shared with the rest of the app
+        would otherwise have its connection pool torn down by the plugin's
+        shutdown hook (which calls ``close()``).
+        """
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        config = SQLAlchemyConfig(engine=engine, create_tables=True, dispose_engine=False)
+        backend = SQLAlchemyBackend(config=config)
+        await backend.startup()
+
+        await backend.close()
+
+        # The engine is still usable by the rest of the host application.
+        _, hashed_key = generate_api_key("test_")
+        await backend.create(
+            hashed_key,
+            APIKeyInfo(key_id="after-close", key_hash=hashed_key, name="Test Key", scopes=["read"]),
+        )
+        assert await backend.get(hashed_key) is not None
+
+        await engine.dispose()
+
 
 class TestSQLAlchemyBackendConfig:
     """Tests for SQLAlchemyConfig."""
@@ -1403,6 +1446,7 @@ class TestSQLAlchemyBackendConfig:
         assert config.table_name == "api_keys"
         assert config.schema is None
         assert config.create_tables is True
+        assert config.dispose_engine is True
 
     def test_config_custom(self) -> None:
         """Test custom SQLAlchemyConfig values."""
@@ -1696,3 +1740,46 @@ class TestSQLAlchemyBackendSQLLogging:
         assert "hide_parameters=True" in doc
         assert "echo=True" in doc
         assert 'echo="debug"' in doc
+
+
+class TestMintAPIKeyWithSQLAlchemyBackend:
+    """``mint_api_key`` must work against a persistent backend, not just memory.
+
+    The SQLAlchemy backend returns a record rebuilt from its ORM model, which
+    has no column for the informational ``prefix`` field -- the helper has to
+    restore it so callers get back the prefix they asked for regardless of
+    backend.
+    """
+
+    async def test_mint_persists_and_returns_prefix(self) -> None:
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        backend = SQLAlchemyBackend(config=SQLAlchemyConfig(engine=engine, create_tables=True))
+        await backend.startup()
+
+        plaintext, info = await backend_mint(backend)
+
+        assert plaintext.startswith("prod_")
+        assert info.prefix == "prod_"
+        assert info.key_id
+
+        stored = await backend.get(hash_api_key(plaintext))
+        assert stored is not None
+        assert stored.key_id == info.key_id
+        assert stored.name == "Reporting job"
+        assert stored.scopes == ["reports:read"]
+
+        await backend.close()
+
+
+async def backend_mint(backend: SQLAlchemyBackend) -> tuple[str, APIKeyInfo]:
+    """Mint a key with fixed test parameters."""
+    return await mint_api_key(
+        backend,
+        name="Reporting job",
+        scopes=["reports:read"],
+        prefix="prod_",
+    )

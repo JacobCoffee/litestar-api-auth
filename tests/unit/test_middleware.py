@@ -991,3 +991,222 @@ class TestRevocationTimingIsDocumented:
         with pytest.raises(NotAuthorizedException):
             await middleware(second_scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
         assert second_scope["state"]["api_key"] is None
+
+
+class TestAuthSchemeExtraction:
+    """Tests for the ``auth_scheme`` option (``Authorization: Bearer <key>``).
+
+    Without it, the middleware treats the entire configured header value as
+    the key, which makes a scheme-prefixed header such as
+    ``Authorization: Bearer pyorg_abc`` unusable: the value hashed and looked
+    up would be the string ``"Bearer pyorg_abc"``. With it set, the
+    case-insensitive ``"{scheme} "`` prefix is stripped, and a value *without*
+    that prefix is ignored entirely rather than being hashed as if it were a
+    key -- so an unrelated credential sharing the same header (``Basic ...``,
+    a JWT under another scheme) can never authenticate.
+    """
+
+    async def _seeded(self) -> tuple[MemoryBackend, str]:
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="bearer-key", key_hash=key_hash, name="Bearer Key", scopes=["read:users"]),
+        )
+        return backend, raw_key
+
+    async def test_bearer_prefixed_value_authenticates(self) -> None:
+        """``Authorization: Bearer <key>`` must authenticate when auth_scheme="Bearer"."""
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", f"Bearer {raw_key}".encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is not None
+        assert scope["state"]["api_key"].key_id == "bearer-key"
+
+    @pytest.mark.parametrize("scheme_text", ["bearer", "BEARER", "BeArEr"])
+    async def test_scheme_match_is_case_insensitive(self, scheme_text: str) -> None:
+        """The scheme prefix must match regardless of case, per RFC 7235."""
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(
+            headers=[(b"authorization", f"{scheme_text} {raw_key}".encode())],
+            stale_api_key=None,
+        )
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is not None
+
+    async def test_value_without_scheme_prefix_is_ignored(self) -> None:
+        """A bare key (no ``Bearer `` prefix) must not authenticate.
+
+        The middleware must leave state untouched rather than hash whatever
+        the header happens to hold.
+        """
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_other_scheme_in_shared_header_is_ignored(self) -> None:
+        """A different scheme's credential in the same header must be ignored."""
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", f"Basic {raw_key}".encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_scheme_with_empty_credential_is_ignored(self) -> None:
+        """``Authorization: Bearer`` with nothing after it must be ignored."""
+        backend, _ = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", b"Bearer   ")], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_default_none_keeps_exact_value_behavior(self) -> None:
+        """With no auth_scheme (the default), the whole header value is the key.
+
+        This pins the backwards-compatible ``X-API-Key`` behavior: a bare key
+        still works, and a scheme-prefixed value does *not* (it is not the
+        key).
+        """
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        bare = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+        await middleware(bare, _noop_receive, _noop_send)  # type: ignore[arg-type]
+        assert bare["state"]["api_key"] is not None
+
+        prefixed = _make_scope(headers=[(b"x-api-key", f"Bearer {raw_key}".encode())], stale_api_key=None)
+        await middleware(prefixed, _noop_receive, _noop_send)  # type: ignore[arg-type]
+        assert prefixed["state"]["api_key"] is None
+
+    async def test_missing_scheme_never_reaches_the_backend(self) -> None:
+        """A value without the scheme prefix must not be hashed or looked up.
+
+        The middleware must also clear a stale/forged ``state["api_key"]``
+        planted by other in-process code (see ``TestStaleStateIsCleared``)
+        rather than leaving it for guards to trust.
+        """
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="bearer-key", key_hash=key_hash, name="Bearer Key", scopes=["read:users"]),
+        )
+        looked_up: list[str] = []
+        original_get = backend.get
+
+        async def recording_get(key_hash_arg: str) -> APIKeyInfo | None:
+            looked_up.append(key_hash_arg)
+            return await original_get(key_hash_arg)
+
+        backend.get = recording_get  # type: ignore[method-assign]
+
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        forged = APIKeyInfo(key_id="forged", key_hash="forged", name="Forged", scopes=["admin:all"])
+        scope = _make_scope(headers=[(b"authorization", raw_key.encode())], stale_api_key=forged)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert looked_up == []
+        assert scope["state"]["api_key"] is None
+
+    async def test_tab_separated_scheme_is_not_accepted(self) -> None:
+        """The prefix is ``"{scheme} "`` with a space; a tab does not match."""
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", f"Bearer\t{raw_key}".encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_extra_spaces_after_scheme_are_tolerated(self) -> None:
+        """``Bearer   <key>`` still yields the key."""
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        scope = _make_scope(headers=[(b"authorization", f"Bearer   {raw_key}".encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is not None
+
+    @pytest.mark.parametrize("valid_first", [True, False])
+    async def test_duplicate_headers_use_the_first_one_only(self, valid_first: bool) -> None:
+        """Duplicate configured headers keep the pre-existing first-wins rule.
+
+        Sending the same header twice is malformed, and this middleware has
+        always read the first occurrence (for ``X-API-Key`` as much as for
+        ``Authorization``); this pins that the scheme support did not change
+        it. First-wins fails *closed* when the bogus value comes first, which
+        is the safer half of the ambiguity, and tightening it further (e.g.
+        rejecting any duplicated header outright) would break deployments
+        where a proxy duplicates a legitimate key header.
+        """
+        backend, raw_key = await self._seeded()
+        middleware = APIKeyMiddleware(
+            app=_dummy_app,  # type: ignore[arg-type]
+            backend=backend,  # type: ignore[arg-type]
+            header_name="Authorization",
+            auth_scheme="Bearer",
+        )
+        valid = (b"authorization", f"Bearer {raw_key}".encode())
+        bogus = (b"authorization", b"Basic bm9wZQ==")
+        headers = [valid, bogus] if valid_first else [bogus, valid]
+        scope = _make_scope(headers=headers, stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert (scope["state"]["api_key"] is not None) is valid_first

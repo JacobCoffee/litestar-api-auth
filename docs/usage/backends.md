@@ -82,6 +82,17 @@ config = APIAuthConfig(
 | `table_name`    | `str`                  | `"api_keys"` | Name of the table that stores API keys.           |
 | `schema`        | `str \| None`          | `None`       | Optional database schema name.                    |
 | `create_tables` | `bool`                 | `True`       | Create the table on startup if it does not exist. |
+| `dispose_engine`| `bool`                 | `True`       | Whether `close()` disposes the engine. Set to `False` for an engine the host application owns and shares. |
+
+If the engine is created just for this backend, leave `dispose_engine` at its
+default so shutting the app down releases the connection pool. If you pass in
+an engine that the rest of your application also uses, set it to `False` --
+otherwise the plugin's shutdown hook (which calls `close()`) disposes an engine
+other parts of the app still depend on:
+
+```python
+SQLAlchemyConfig(engine=app_engine, dispose_engine=False)
+```
 
 ### Database Schema
 
@@ -471,14 +482,27 @@ assert isinstance(MyCustomBackend(), APIKeyBackend)
 ### The APIKeyInfo Struct
 
 All backends store and return {class}`~litestar_api_auth.backends.base.APIKeyInfo`
-instances. This is a `msgspec.Struct` with the following fields:
+instances. This is a `msgspec.Struct` with the following fields.
+
+```{note}
+There is a single `APIKeyInfo` class.
+{class}`~litestar_api_auth.backends.base.APIKeyInfo` and
+{class}`~litestar_api_auth.types.APIKeyInfo` are two import paths for the same
+object, so `isinstance` checks agree whichever one you import.
+
+Construction is keyword-only. The two structs this consolidates had different
+positional field orders, and `msgspec.Struct` does not validate field types on
+direct construction, so a positional call is rejected with a `TypeError`
+instead of silently building a mis-populated record.
+```
 
 | Field          | Type                      | Default  | Description                                |
 |----------------|---------------------------|----------|--------------------------------------------|
-| `key_id`       | `str`                     | required | Unique identifier (UUID) for the key.      |
-| `key_hash`     | `str`                     | required | SHA-256 hash of the raw API key.           |
+| `key_id`       | `str`                     | required | Unique identifier for the key.             |
 | `name`         | `str`                     | required | Human-readable name for the key.           |
 | `scopes`       | `list[str]`               | required | Permission scopes (e.g. `["read"]`).       |
+| `key_hash`     | `str`                     | `""`     | SHA-256 hash of the raw API key. Blanked on the copy exposed via request state. |
+| `prefix`       | `str \| None`             | `None`   | Informational key prefix; not persisted by the bundled backends. |
 | `is_active`    | `bool`                    | `True`   | Whether the key is currently active.       |
 | `created_at`   | `datetime \| None`        | `None`   | When the key was created.                  |
 | `expires_at`   | `datetime \| None`        | `None`   | When the key expires (None = no expiry).   |
@@ -487,7 +511,10 @@ instances. This is a `msgspec.Struct` with the following fields:
 
 `APIKeyInfo` also provides convenience methods:
 
+- `state` -- property returning the key's {class}`~litestar_api_auth.types.APIKeyState`.
 - `is_expired` -- property that checks whether the key has passed its `expires_at`.
+- `is_valid` -- property that is `True` when the key is active and not expired.
 - `has_scope(scope)` -- returns `True` if the key has a specific scope.
 - `has_scopes(scopes, requirement="all")` -- checks for multiple scopes. Set
   `requirement="any"` to require at least one match instead of all.
+  `required_scopes=` is accepted as a legacy keyword alias for `scopes`.

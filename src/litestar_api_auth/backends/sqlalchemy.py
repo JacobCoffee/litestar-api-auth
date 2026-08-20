@@ -154,12 +154,21 @@ class SQLAlchemyConfig:
         table_name: Name of the table to store API keys in.
         schema: Optional database schema name.
         create_tables: Whether to create tables on startup if they don't exist.
+        dispose_engine: Whether ``SQLAlchemyBackend.close()`` disposes the
+            engine (and its connection pool). Defaults to True, which suits an
+            engine created solely for this backend. Set False when handing in
+            an engine owned by the host application and shared with the rest of
+            it -- otherwise the plugin's shutdown hook (see
+            ``APIAuthPlugin._register_lifespan_handlers``, which calls
+            ``close()``) tears down connections that other parts of the app
+            still use.
     """
 
     engine: AsyncEngine | None = None
     table_name: str = "api_keys"
     schema: str | None = None
     create_tables: bool = True
+    dispose_engine: bool = True
 
 
 class SQLAlchemyBackend:
@@ -682,9 +691,13 @@ class SQLAlchemyBackend:
     async def close(self) -> None:
         """Close the backend and release database connections.
 
-        Disposes of the SQLAlchemy engine and its connection pool.
+        Disposes of the SQLAlchemy engine and its connection pool, unless
+        ``SQLAlchemyConfig.dispose_engine`` is False -- in which case the
+        engine is left untouched because the host application owns it and
+        other parts of that application may still be using it. This is a
+        no-op either way when no engine is configured.
         """
-        if self._engine is not None:
+        if self._engine is not None and self.config.dispose_engine:
             await self._engine.dispose()
 
     def __repr__(self) -> str:

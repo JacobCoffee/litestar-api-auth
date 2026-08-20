@@ -124,6 +124,9 @@ class APIKeyMiddleware(AbstractMiddleware):
         backend: The storage backend for API keys.
         header_name: The HTTP header name to extract the key from.
         update_last_used: Whether to update the last_used_at timestamp on each request.
+        auth_scheme: Optional scheme prefix required on the header value
+            (e.g. ``"Bearer"`` for ``Authorization: Bearer <key>``). None
+            means the entire header value is the key.
 
     Example:
         >>> from litestar import Litestar
@@ -144,6 +147,7 @@ class APIKeyMiddleware(AbstractMiddleware):
         header_name: str = "X-API-Key",
         update_last_used: bool = True,
         exclude_paths: str | list[str] | None = None,
+        auth_scheme: str | None = None,
     ) -> None:
         """Initialize the middleware.
 
@@ -157,11 +161,25 @@ class APIKeyMiddleware(AbstractMiddleware):
                 bypass this middleware entirely (see
                 ``AbstractMiddleware.exclude``), so no lookup or usage-update
                 is performed for them even if an API key header is present.
+            auth_scheme: Optional authentication scheme the header value is
+                expected to be prefixed with, e.g. ``"Bearer"`` for
+                ``Authorization: Bearer <key>``. The prefix match is
+                case-insensitive and a header value *without* it is ignored
+                entirely (treated as "no key presented"), so an unrelated
+                credential in a shared header such as ``Authorization``
+                (``Basic ...``, a JWT under a different scheme) is never
+                hashed and looked up as if it were an API key. Defaults to
+                None, meaning the whole header value is the key -- the
+                historical ``X-API-Key`` behavior.
         """
         super().__init__(app=app, exclude=exclude_paths)
         self.backend = backend
         self.header_name = header_name.lower()  # HTTP headers are case-insensitive
         self.update_last_used = update_last_used
+        self.auth_scheme = auth_scheme
+        # Precomputed lowercase ``"{scheme} "`` so the per-request check is a
+        # single casefolded startswith rather than a split-and-compare.
+        self._auth_scheme_prefix = f"{auth_scheme.lower()} " if auth_scheme else None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Process the request through the middleware.
@@ -301,6 +319,13 @@ class APIKeyMiddleware(AbstractMiddleware):
     def _extract_api_key(self, scope: Scope) -> str | None:
         """Extract the API key from request headers.
 
+        When ``auth_scheme`` is configured, the header value must start with a
+        case-insensitive ``"{scheme} "`` prefix (e.g. ``"Bearer "``) and only
+        the remainder is treated as the key. A value that does not carry that
+        prefix -- or that carries it with nothing after it -- yields None, so
+        the request is handled exactly as if no key had been presented at all
+        (see ``__call__``: request state is left as ``None``).
+
         Args:
             scope: The ASGI connection scope.
 
@@ -311,7 +336,12 @@ class APIKeyMiddleware(AbstractMiddleware):
 
         for header_name, header_value in headers:
             if header_name.decode("latin-1").lower() == self.header_name:
-                return header_value.decode("latin-1").strip()
+                value = header_value.decode("latin-1").strip()
+                if self._auth_scheme_prefix is None:
+                    return value or None
+                if not value.lower().startswith(self._auth_scheme_prefix):
+                    return None
+                return value[len(self._auth_scheme_prefix) :].strip() or None
 
         return None
 

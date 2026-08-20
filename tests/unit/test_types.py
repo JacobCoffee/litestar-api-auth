@@ -48,7 +48,8 @@ class TestAPIKeyInfo:
         assert base_key_info.expires_at is None
         assert base_key_info.last_used_at is None
         assert base_key_info.is_active is True
-        assert base_key_info.metadata == {}
+        assert base_key_info.metadata is None
+        assert base_key_info.key_hash == ""
 
     def test_initialization_with_all_fields(self) -> None:
         """Test APIKeyInfo initialization with all fields."""
@@ -76,10 +77,17 @@ class TestAPIKeyInfo:
             "environment": "production",
         }
 
-    def test_frozen_dataclass(self, base_key_info: APIKeyInfo) -> None:
-        """Test that APIKeyInfo is immutable."""
-        with pytest.raises(AttributeError):
-            base_key_info.name = "New Name"  # type: ignore[misc]
+    def test_struct_is_mutable(self, base_key_info: APIKeyInfo) -> None:
+        """The canonical ``APIKeyInfo`` is a mutable struct.
+
+        It used to be two structs -- a frozen ``types.APIKeyInfo`` and a
+        mutable ``backends.base.APIKeyInfo`` -- and the consolidated struct
+        keeps the mutable (backend) semantics, since backends and any
+        third-party backend written against ``backends.base`` may assign to
+        fields such as ``last_used_at``.
+        """
+        base_key_info.name = "New Name"
+        assert base_key_info.name == "New Name"
 
     def test_state_active(self, base_key_info: APIKeyInfo) -> None:
         """Test state property returns ACTIVE for active, non-expired key."""
@@ -241,8 +249,15 @@ class TestAPIKeyInfo:
         result = base_key_info.has_scopes(["read:users", "admin:delete"])
         assert result is False
 
-    def test_metadata_default_factory(self) -> None:
-        """Test that metadata uses default factory and doesn't share state."""
+    def test_metadata_defaults_to_none_and_is_not_shared(self) -> None:
+        """metadata defaults to None, and explicit dicts are never shared.
+
+        The consolidated struct keeps the backend struct's ``None`` default
+        (rather than the old ``types.APIKeyInfo`` empty-dict default) because
+        the bundled backends distinguish "no metadata" from an empty mapping
+        when persisting -- see ``SQLAlchemyBackend.create``'s ``metadata_``
+        handling.
+        """
         key1 = APIKeyInfo(
             key_id="key1",
             prefix="test_",
@@ -257,9 +272,52 @@ class TestAPIKeyInfo:
             name="Key 2",
             scopes=[],
             created_at=datetime.utcnow(),
+            metadata={},
         )
 
-        # Metadata should be separate instances
-        assert key1.metadata is not key2.metadata
-        assert key1.metadata == {}
+        assert key1.metadata is None
         assert key2.metadata == {}
+
+        key2.metadata["owner"] = "someone"  # type: ignore[index]
+        assert key1.metadata is None
+
+
+class TestConsolidatedStructCompatibility:
+    """Tests for the one-struct consolidation's compatibility surface.
+
+    ``types.APIKeyInfo`` (public, was frozen, had ``prefix``) and
+    ``backends.base.APIKeyInfo`` (live, has ``key_hash``) are now a single
+    class. The two had *different* positional field orders, so construction is
+    keyword-only: an old positional call fails loudly instead of silently
+    building a record with a hash in its ``name`` field (``msgspec.Struct``
+    does not validate field types on direct construction).
+    """
+
+    def test_both_import_paths_are_the_same_class(self) -> None:
+        from litestar_api_auth import APIKeyInfo as ExportedAPIKeyInfo
+        from litestar_api_auth.backends.base import APIKeyInfo as BackendAPIKeyInfo
+
+        assert BackendAPIKeyInfo is APIKeyInfo
+        assert ExportedAPIKeyInfo is APIKeyInfo
+
+    def test_positional_construction_raises(self) -> None:
+        """Neither historical positional order silently constructs a record."""
+        with pytest.raises(TypeError):
+            APIKeyInfo("abc123", "pyorg_", "Test Key", [])  # type: ignore[misc]
+
+        with pytest.raises(TypeError):
+            APIKeyInfo("abc123", "hash", "Test Key", [])  # type: ignore[misc]
+
+    def test_has_scopes_accepts_legacy_required_scopes_keyword(self) -> None:
+        """The old public struct's ``required_scopes=`` keyword still works."""
+        key_info = APIKeyInfo(key_id="abc", name="Test", scopes=["read:users", "write:posts"])
+
+        assert key_info.has_scopes(required_scopes=["read:users"]) is True
+        assert key_info.has_scopes(required_scopes=["admin:all"]) is False
+        assert key_info.has_scopes(required_scopes=["read:users", "admin:all"], requirement="any") is True
+
+    def test_has_scopes_without_scopes_raises_type_error(self) -> None:
+        key_info = APIKeyInfo(key_id="abc", name="Test", scopes=["read:users"])
+
+        with pytest.raises(TypeError):
+            key_info.has_scopes()

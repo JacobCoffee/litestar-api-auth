@@ -6,7 +6,7 @@ into Litestar applications, including middleware, routes, guards, and dependenci
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from litestar.plugins import InitPluginProtocol
@@ -15,6 +15,7 @@ from litestar_api_auth.backends.base import APIKeyBackend
 
 if TYPE_CHECKING:
     from litestar.config.app import AppConfig
+    from litestar.openapi.config import OpenAPIConfig
     from litestar.types import ControllerRouterHandler, Guard
 
 __all__ = [
@@ -35,6 +36,42 @@ def _default_management_guards() -> list[Guard]:
     return list(APIKeyController.guards)
 
 
+def _copy_openapi_config(openapi_config: OpenAPIConfig) -> OpenAPIConfig:
+    """Return a per-app copy of an ``OpenAPIConfig`` that is safe to mutate.
+
+    Litestar hands *every* app that doesn't pass its own ``openapi_config``
+    the same module-level ``DEFAULT_OPENAPI_CONFIG`` instance, so registering
+    this app's security scheme -- or, with ``openapi_global_security``, its
+    document-wide security requirement -- directly on that object would leak
+    into every other Litestar app in the same process. The nested
+    ``Components`` (and its ``security_schemes`` dict) and the ``security``
+    list are copied too, since ``dataclasses.replace`` alone would keep
+    sharing them with the original.
+
+    Args:
+        openapi_config: The config to copy.
+
+    Returns:
+        A copy whose mutable members are not shared with the original.
+    """
+    from litestar.openapi.spec import Components
+
+    components = openapi_config.components
+    if isinstance(components, Components):
+        components = replace(components)
+        if components.security_schemes is not None:
+            components.security_schemes = dict(components.security_schemes)
+    elif isinstance(components, list):
+        components = list(components)
+
+    security = openapi_config.security
+    return replace(
+        openapi_config,
+        components=components,
+        security=list(security) if security is not None else None,
+    )
+
+
 @dataclass
 class APIAuthConfig:
     """Configuration for the API key authentication plugin.
@@ -46,6 +83,16 @@ class APIAuthConfig:
         backend: The storage backend for API keys (required).
         key_prefix: Prefix for generated API keys (e.g., "pyorg_").
         header_name: HTTP header to extract API keys from.
+        auth_scheme: Optional authentication scheme prefix expected on
+            ``header_name``'s value -- e.g. ``auth_scheme="Bearer"`` with
+            ``header_name="Authorization"`` accepts
+            ``Authorization: Bearer <key>``. The match is case-insensitive,
+            and a header value lacking the prefix is ignored entirely rather
+            than being hashed and looked up as a key, so an unrelated
+            credential sharing the same header (``Basic ...``, a JWT under
+            another scheme) can never be mistaken for an API key. Defaults to
+            None, meaning the whole header value is the key (the historical
+            ``X-API-Key`` behavior).
         auto_routes: Whether to auto-register CRUD routes for key management.
         route_prefix: URL prefix for auto-registered routes.
         exclude_paths: Paths to exclude from API key authentication. Each entry
@@ -59,6 +106,17 @@ class APIAuthConfig:
         route_handlers: Optional custom route handlers to register.
         dependencies: Optional custom dependencies to inject.
         enable_openapi: Whether to include auth in OpenAPI schema.
+        openapi_global_security: Whether to also advertise the security
+            scheme as a document-wide default requirement
+            (``openapi_config.security``), marking *every* documented route as
+            key-authed. Defaults to False: runtime enforcement is guard
+            opt-in per handler and the middleware is fail-open, so in a host
+            app whose routes are mostly unauthenticated a blanket default
+            would misrepresent the app's security posture. The requirement is
+            always attached to the routes this plugin actually guards (the
+            auto-registered management controller) regardless of this
+            setting. Set True only for an app where every route really does
+            require an API key.
         track_usage: Whether to update last_used_at on each request.
         management_guards: Guards applied to the auto-registered key management
             routes. Defaults to requiring the ``api_keys:admin`` scope, since
@@ -88,9 +146,11 @@ class APIAuthConfig:
     dependencies: dict[str, Any] = field(default_factory=dict)
     enable_openapi: bool = True
     track_usage: bool = True
-    # Appended last (rather than interleaved above) so adding this field
+    # Appended last (rather than interleaved above) so adding these fields
     # doesn't shift the positional order of pre-existing fields.
     management_guards: list[Guard] = field(default_factory=_default_management_guards)
+    auth_scheme: str | None = None
+    openapi_global_security: bool = False
 
 
 class APIAuthPlugin(InitPluginProtocol):
@@ -288,13 +348,15 @@ class APIAuthPlugin(InitPluginProtocol):
         from litestar_api_auth.middleware import APIKeyMiddleware
 
         # Create middleware configuration
-        # The middleware expects: app, backend, header_name, update_last_used, exclude_paths
+        # The middleware expects: app, backend, header_name, update_last_used,
+        # exclude_paths, auth_scheme
         middleware = DefineMiddleware(
             APIKeyMiddleware,
             backend=self.config.backend,
             header_name=self.config.header_name,
             update_last_used=self.config.track_usage,
             exclude_paths=self.config.exclude_paths,
+            auth_scheme=self.config.auth_scheme,
         )
 
         # Add to middleware list
@@ -420,14 +482,22 @@ class APIAuthPlugin(InitPluginProtocol):
     def _configure_openapi(self, app_config: AppConfig) -> None:
         """Register the ``APIKeyAuth`` OpenAPI security scheme.
 
-        This only defines the scheme in ``components.securitySchemes`` --
-        it does not mark every operation (or the document as a whole) as
-        requiring it. See ``_register_routes`` for where the requirement is
-        actually attached, scoped to the routes this plugin guards.
+        By default this only defines the scheme in
+        ``components.securitySchemes`` -- it does not mark every operation (or
+        the document as a whole) as requiring it. See ``_register_routes`` for
+        where the requirement is attached, scoped to the routes this plugin
+        guards. Set ``APIAuthConfig.openapi_global_security`` to True to
+        *also* advertise it as a document-wide default.
+
+        The scheme's own shape follows ``APIAuthConfig.auth_scheme``: with a
+        ``"bearer"`` scheme configured it is an HTTP bearer scheme (which is
+        what an ``Authorization: Bearer <key>`` setup actually is), otherwise
+        an ``apiKey`` scheme named after ``header_name``.
 
         Args:
             app_config: The application configuration to modify.
         """
+        from litestar.app import DEFAULT_OPENAPI_CONFIG
         from litestar.openapi.config import OpenAPIConfig
         from litestar.openapi.spec import Components, SecurityScheme
 
@@ -437,16 +507,33 @@ class APIAuthPlugin(InitPluginProtocol):
                 title="API",
                 version="1.0.0",
             )
+        elif app_config.openapi_config is DEFAULT_OPENAPI_CONFIG:
+            app_config.openapi_config = _copy_openapi_config(app_config.openapi_config)
 
         openapi_config = app_config.openapi_config
 
-        # Create security scheme for API key
-        security_scheme = SecurityScheme(
-            type="apiKey",
-            name=self.config.header_name,
-            security_scheme_in="header",
-            description=f"API key authentication using {self.config.header_name} header",
-        )
+        # Create security scheme for API key. An ``auth_scheme``-prefixed
+        # header is an HTTP authentication scheme in OpenAPI terms, not an
+        # apiKey-in-header one -- describing ``Authorization: Bearer <key>``
+        # as ``type="apiKey", name="Authorization"`` would make generated
+        # clients send the bare key with no scheme prefix, which the
+        # middleware then ignores.
+        if self.config.auth_scheme:
+            security_scheme = SecurityScheme(
+                type="http",
+                scheme=self.config.auth_scheme.lower(),
+                description=(
+                    f"API key authentication using the {self.config.header_name} header "
+                    f"with the {self.config.auth_scheme} scheme"
+                ),
+            )
+        else:
+            security_scheme = SecurityScheme(
+                type="apiKey",
+                name=self.config.header_name,
+                security_scheme_in="header",
+                description=f"API key authentication using {self.config.header_name} header",
+            )
 
         # Add to components
         if openapi_config.components is None:
@@ -466,10 +553,16 @@ class APIAuthPlugin(InitPluginProtocol):
                 openapi_config.components.security_schemes = {}
             openapi_config.components.security_schemes["APIKeyAuth"] = security_scheme
 
-        # Deliberately not appended as a document-wide default requirement
-        # here (e.g. ``openapi_config.security.append(...)``). Runtime
-        # enforcement is guard opt-in per handler and the middleware itself
-        # is fail-open, so a blanket default would make every unguarded
-        # route in the app look protected in the generated schema. Instead,
-        # ``_register_routes`` attaches this requirement only to the routes
-        # it actually guards (the auto-registered management controller).
+        # A document-wide default requirement is opt-in via
+        # ``openapi_global_security`` (default False). Runtime enforcement is
+        # guard opt-in per handler and the middleware itself is fail-open, so
+        # a blanket default would make every unguarded route in the app look
+        # protected in the generated schema -- misleading in a host app whose
+        # routes are mostly unauthenticated. Regardless of this setting,
+        # ``_register_routes`` attaches the requirement to the routes this
+        # plugin actually guards (the auto-registered management controller).
+        if self.config.openapi_global_security:
+            if openapi_config.security is None:
+                openapi_config.security = []
+            if {"APIKeyAuth": []} not in openapi_config.security:
+                openapi_config.security.append({"APIKeyAuth": []})
