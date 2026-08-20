@@ -269,6 +269,18 @@ class APIKeyMiddleware(AbstractMiddleware):
         if key_info is None:
             raise APIKeyNotFoundError()
 
+        # A backend record whose is_active/scopes fields don't actually match
+        # the types APIKeyInfo declares must not be trusted: msgspec.Struct
+        # does not enforce field types on direct construction, so a
+        # custom/legacy backend, migrated or corrupted data, or direct
+        # programmatic seeding could otherwise fail open here -- e.g. a
+        # truthy non-bool is_active (the string "false") would pass the
+        # check below, and a scopes value that is a str instead of a
+        # list[str] would turn has_scope's membership check into a substring
+        # match. See APIKeyInfo.has_valid_types.
+        if not key_info.has_valid_types:
+            raise InvalidAPIKeyError(reason="backend record has invalid field types")
+
         # Check if the key is revoked
         if not key_info.is_active:
             raise APIKeyRevokedError(key_id=key_info.key_id)

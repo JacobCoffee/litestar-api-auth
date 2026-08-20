@@ -768,3 +768,64 @@ class TestAPIKeyInfoHasScopes:
         key_info = self._key_info()
         with pytest.raises(ValueError, match="Invalid requirement"):
             key_info.has_scopes(["read:users", "write:users"], requirement="bogus")
+
+
+class TestAPIKeyInfoHasValidTypes:
+    """Regression tests for ``APIKeyInfo.has_valid_types`` (backends.base).
+
+    ``msgspec.Struct`` does not type-check on direct construction, so a
+    custom/legacy backend, migrated or corrupted serialized data, or direct
+    programmatic seeding can produce an ``APIKeyInfo`` whose ``is_active`` is
+    a truthy non-``bool`` (e.g. the string ``"false"``) or whose ``scopes``
+    is a ``str`` instead of a ``list[str]``. Before ``has_valid_types``
+    existed, such a record would fail open: ``not "false"`` is ``False``, so
+    the active checks in ``APIKeyMiddleware._validate_api_key`` and
+    ``guards.get_api_key_info`` both passed, and ``"admin" in
+    "api_keys:admin"`` is a substring match rather than a membership check,
+    so ``has_scope``/``has_scopes`` did too.
+    """
+
+    def test_well_formed_record_is_valid(self) -> None:
+        """A normally constructed record must report as valid."""
+        key_info = APIKeyInfo(key_id="ok", key_hash="hash", name="OK", scopes=["read:users"], is_active=True)
+        assert key_info.has_valid_types is True
+
+    def test_string_is_active_is_invalid(self) -> None:
+        """A truthy non-bool ``is_active`` (e.g. the string "false") must be rejected.
+
+        Before the fix, ``not "false"`` evaluated to ``False``, so this record
+        would have passed every "is the key active" check downstream.
+        """
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes=["api_keys:admin"],
+            is_active="false",  # type: ignore[arg-type]
+        )
+        assert key_info.has_valid_types is False
+
+    def test_string_scopes_is_invalid(self) -> None:
+        """A ``scopes`` value that is a ``str`` instead of ``list[str]`` must be rejected.
+
+        Before the fix, ``"admin" in "api_keys:admin"`` was a substring match
+        (``True``), not a membership check, so ``has_scope("admin")`` would
+        have incorrectly granted a scope this key never held as a list member.
+        """
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes="api_keys:admin",  # type: ignore[arg-type]
+        )
+        assert key_info.has_valid_types is False
+
+    def test_non_string_scope_member_is_invalid(self) -> None:
+        """A scopes list containing a non-str member must also be rejected."""
+        key_info = APIKeyInfo(
+            key_id="bad",
+            key_hash="hash",
+            name="Bad",
+            scopes=["read:users", 123],  # type: ignore[list-item]
+        )
+        assert key_info.has_valid_types is False

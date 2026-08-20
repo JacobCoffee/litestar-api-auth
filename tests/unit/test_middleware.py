@@ -217,6 +217,66 @@ class TestStaleStateIsCleared:
         assert scope["state"]["api_key"].key_id == "good"
 
 
+class TestMalformedBackendRecordFailsClosed:
+    """Regression tests: a backend record whose ``is_active``/``scopes``
+    fields don't match the types ``APIKeyInfo`` declares must not be trusted.
+
+    ``msgspec.Struct`` does not type-check on direct construction, so a
+    custom/legacy backend, migrated or corrupted serialized data, or direct
+    programmatic seeding can hand ``_validate_api_key`` an ``APIKeyInfo``
+    whose ``is_active`` is a truthy non-``bool`` (e.g. the string "false")
+    or whose ``scopes`` is a ``str`` instead of a ``list[str]``. Before the
+    fix, ``not "false"`` is ``False``, so such a record sailed past the
+    revocation check here and was stored in ``state["api_key"]`` -- and
+    ``"admin" in "api_keys:admin"`` is a substring match, so a downstream
+    ``require_scope("admin")`` guard would then have granted access the
+    record never actually held as a scope list member.
+    """
+
+    async def test_string_is_active_fails_closed(self) -> None:
+        """A record with ``is_active="false"`` must not populate state["api_key"]."""
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(
+                key_id="malformed",
+                key_hash=key_hash,
+                name="Malformed",
+                scopes=["api_keys:admin"],
+                is_active="false",  # type: ignore[arg-type]
+            ),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+    async def test_string_scopes_fails_closed(self) -> None:
+        """A record with ``scopes`` as a ``str`` must not populate state["api_key"]."""
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(
+                key_id="malformed",
+                key_hash=key_hash,
+                name="Malformed",
+                scopes="api_keys:admin",  # type: ignore[arg-type]
+            ),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+
 class _RevokedDuringUpdateBackend(MemoryBackend):
     """A race-aware backend that detects concurrent revocation inside update_last_used().
 
@@ -550,10 +610,11 @@ class _KeyInfoWithExplodingIsExpired:
     ``is_expired``-equivalent logic chokes on).
 
     Deliberately duck-typed rather than a real ``APIKeyInfo`` instance, since
-    only the attributes ``_validate_api_key`` actually reads (``is_active``,
-    ``is_expired``, ``key_id``) need to be present.
+    only the attributes ``_validate_api_key`` actually reads (``has_valid_types``,
+    ``is_active``, ``is_expired``, ``key_id``) need to be present.
     """
 
+    has_valid_types = True
     is_active = True
     key_id = "good"
 

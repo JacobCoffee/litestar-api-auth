@@ -57,8 +57,10 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
         This function does not merely trust a truthy ``state["api_key"]``:
         "api_key" is a generic, unnamespaced state key, so other in-process
         middleware/dependencies/handlers could write something else to it.
-        This re-validates the object's type and its ``is_active``/``is_expired``
-        status rather than assuming ``APIKeyMiddleware`` was the last writer.
+        This re-validates the object's type, that its ``is_active``/``scopes``
+        fields actually match the types ``APIKeyInfo`` declares (see
+        :attr:`APIKeyInfo.has_valid_types`), and its ``is_active``/``is_expired``
+        status, rather than assuming ``APIKeyMiddleware`` was the last writer.
 
     Example:
         >>> from litestar import get, Request
@@ -74,7 +76,12 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
     """
     api_key = connection.state.get("api_key")
 
-    if not isinstance(api_key, APIKeyInfo) or not api_key.is_active or api_key.is_expired:
+    if (
+        not isinstance(api_key, APIKeyInfo)
+        or not api_key.has_valid_types
+        or not api_key.is_active
+        or api_key.is_expired
+    ):
         raise NotAuthorizedException(
             detail="No API key found in request. Ensure APIKeyMiddleware is configured and a valid API key is provided."
         )

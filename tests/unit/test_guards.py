@@ -124,6 +124,33 @@ class TestStateTrustBoundary:
         with pytest.raises(NotAuthorizedException):
             require_scope("admin")(connection, None)  # type: ignore[arg-type]
 
+    def test_malformed_record_fails_require_scope_despite_substring_match(self) -> None:
+        """A record with non-conforming field types must not satisfy ``require_scope``.
+
+        ``msgspec.Struct`` does not type-check on direct construction, so a
+        custom/legacy backend, migrated or corrupted data, or direct
+        programmatic seeding could land exactly this in state: ``is_active``
+        as the truthy string ``"false"`` and ``scopes`` as a plain ``str``.
+        Before the fix, ``not "false"`` is ``False`` (so the active check
+        passed) and ``"admin" in "api_keys:admin"`` is a substring match
+        (so ``has_scope("admin")`` incorrectly returned True) -- reachable
+        end-to-end through the real middleware+guard.
+        """
+        malformed = BackendAPIKeyInfo(
+            key_id="malformed",
+            key_hash="",
+            name="Malformed",
+            scopes="api_keys:admin",  # type: ignore[arg-type]
+            is_active="false",  # type: ignore[arg-type]
+        )
+        connection = _connection_with_state_api_key(malformed)
+
+        with pytest.raises(NotAuthorizedException):
+            require_api_key(connection, None)  # type: ignore[arg-type]
+
+        with pytest.raises(NotAuthorizedException):
+            require_scope("admin")(connection, None)  # type: ignore[arg-type]
+
     def test_forged_active_but_expired_key_fails(self) -> None:
         """An expired key that is still marked active must still be rejected."""
         forged = BackendAPIKeyInfo(

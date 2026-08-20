@@ -57,6 +57,34 @@ class APIKeyInfo(msgspec.Struct):
             expires = expires.replace(tzinfo=timezone.utc)
         return now > expires
 
+    @property
+    def has_valid_types(self) -> bool:
+        """Whether ``is_active`` and ``scopes`` actually match the types this class declares.
+
+        ``msgspec.Struct`` does not enforce field types when a struct is built
+        directly in Python (only decoding via ``msgspec.json.decode``/
+        ``msgspec.convert`` does), so a custom/legacy backend, migrated or
+        corrupted serialized data, or direct programmatic seeding can produce
+        a record whose ``is_active`` is a truthy non-``bool`` (e.g. the string
+        ``"false"``) or whose ``scopes`` is a ``str`` instead of a
+        ``list[str]``. Both would silently fail open for a caller that trusts
+        this record without checking this property first: ``not "false"`` is
+        ``False``, so the "is the key active" checks in
+        ``APIKeyMiddleware._validate_api_key`` and ``guards.get_api_key_info``
+        would both pass, and ``"admin" in "api_keys:admin"`` is a substring
+        match rather than a membership check, so ``has_scope``/``has_scopes``
+        would too.
+
+        Returns:
+            True if ``is_active`` is actually a ``bool`` and ``scopes`` is
+            actually a ``list`` of ``str``, False otherwise.
+        """
+        return (
+            isinstance(self.is_active, bool)
+            and isinstance(self.scopes, list)
+            and all(isinstance(s, str) for s in self.scopes)
+        )
+
     def has_scope(self, scope: str) -> bool:
         """Check if the API key has a specific scope.
 
