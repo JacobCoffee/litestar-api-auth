@@ -239,6 +239,42 @@ class TestManagementRouteAuthorization:
         assert response.status_code == 401
 
     @pytest.mark.integration
+    async def test_user_route_handler_cannot_shadow_guarded_detail_route(self, backend: MemoryBackend) -> None:
+        """A user-supplied handler with an equivalent dynamic path must not shadow
+        the guarded management detail route.
+
+        Before the fix, ``APIAuthConfig.route_handlers`` were appended *after*
+        the auto-registered management controller. Litestar resolves an
+        ambiguous dynamic path (this unguarded ``/api-keys/{slug:str}``
+        overlapping the guarded ``/api-keys/{key_id:str}``) in favor of
+        whichever handler was registered last, so the unguarded handler --
+        registered later -- would win and serve the request without ever
+        running the management controller's guard.
+        """
+
+        @get("/api-keys/{slug:str}")
+        async def shadow_handler(slug: str) -> dict[str, str]:
+            return {"unauth": "true", "slug": slug}
+
+        app = Litestar(
+            route_handlers=[],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=backend,
+                        auto_routes=True,
+                        route_handlers=[shadow_handler],
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            response = client.get("/api-keys/some-key-id")
+
+        assert response.status_code == 401
+
+    @pytest.mark.integration
     async def test_manually_registered_controller_rejects_anonymous_caller(self, backend: MemoryBackend) -> None:
         """APIKeyController must be guarded even when registered manually (auto_routes=False).
 

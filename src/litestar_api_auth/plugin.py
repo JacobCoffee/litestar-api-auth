@@ -150,9 +150,10 @@ class APIAuthPlugin(InitPluginProtocol):
         This method is called during application initialization and performs:
         1. Registers the backend as a dependency
         2. Adds the authentication middleware
-        3. Registers auto-routes if enabled
-        4. Sets up lifespan handlers for backend startup/shutdown
-        5. Configures OpenAPI security schemes
+        3. Adds custom route handlers
+        4. Registers auto-routes if enabled
+        5. Sets up lifespan handlers for backend startup/shutdown
+        6. Configures OpenAPI security schemes
 
         Args:
             app_config: The Litestar application configuration.
@@ -174,13 +175,20 @@ class APIAuthPlugin(InitPluginProtocol):
         # Add middleware for API key extraction and validation
         self._register_middleware(app_config)
 
+        # Add custom route handlers *before* the auto-registered management
+        # controller below. Litestar resolves an ambiguous dynamic path
+        # (e.g. a user-supplied "/api-keys/{slug:str}" overlapping this
+        # plugin's guarded "/api-keys/{key_id:str}") in favor of whichever
+        # handler was registered last, so the guarded controller must always
+        # be added after -- and therefore win over -- any user-supplied
+        # handler, rather than risk an unguarded handler silently shadowing
+        # it depending on registration order.
+        if self.config.route_handlers:
+            app_config.route_handlers.extend(self.config.route_handlers)
+
         # Register auto-routes if enabled
         if self.config.auto_routes:
             self._register_routes(app_config)
-
-        # Add custom route handlers
-        if self.config.route_handlers:
-            app_config.route_handlers.extend(self.config.route_handlers)
 
         # Set up lifespan handlers for backend initialization
         self._register_lifespan_handlers(app_config)
