@@ -50,8 +50,11 @@ class APIAuthConfig:
         route_prefix: URL prefix for auto-registered routes.
         exclude_paths: Paths to exclude from API key authentication. Each entry
             is a regex pattern matched (unanchored) against the request path,
-            per Litestar's ``AbstractMiddleware.exclude`` -- e.g. "/health"
-            also matches "/v1/health". Anchor patterns yourself (e.g.
+            per Litestar's ``AbstractMiddleware.exclude`` -- e.g. an unanchored
+            "/health" would also match "/user/health-records". The defaults
+            below are anchored (``r"^/schema(/|$)"``, ``r"^/health$"``) so they
+            only ever match the OpenAPI schema routes and the literal
+            "/health" path; anchor your own overrides the same way (e.g.
             ``r"^/health$"``) if that breadth is undesirable.
         route_handlers: Optional custom route handlers to register.
         dependencies: Optional custom dependencies to inject.
@@ -80,7 +83,7 @@ class APIAuthConfig:
     header_name: str = "X-API-Key"
     auto_routes: bool = True
     route_prefix: str = "/api-keys"
-    exclude_paths: list[str] = field(default_factory=lambda: ["/schema", "/health"])
+    exclude_paths: list[str] = field(default_factory=lambda: [r"^/schema(/|$)", r"^/health$"])
     route_handlers: list[ControllerRouterHandler] = field(default_factory=list)
     dependencies: dict[str, Any] = field(default_factory=dict)
     enable_openapi: bool = True

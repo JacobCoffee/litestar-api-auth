@@ -745,6 +745,134 @@ class TestExcludePaths:
         assert response.status_code == 200
         assert response.json() == {"message": "protected"}
 
+    @pytest.mark.integration
+    async def test_default_exclude_paths_are_anchored_not_substrings(self, seeded_backend: MemoryBackend) -> None:
+        """The *default* ``exclude_paths`` must not bypass unrelated routes.
+
+        Before the fix, the defaults (``"/schema"``, ``"/health"``) were
+        unanchored regexes matched via ``.search()`` against the request
+        path, so any route merely *containing* one of those substrings --
+        e.g. ``/api/schemas/1`` or ``/user/health-records`` -- silently
+        skipped ``APIKeyMiddleware`` entirely. That's a fail-closed
+        availability break: a guarded handler on such a route rejects every
+        request, even ones carrying a valid key, because the middleware
+        never runs to populate ``request.state.api_key``.
+        """
+
+        @get("/api/schemas/1", guards=[require_api_key])
+        async def get_schema_route() -> dict:
+            return {"message": "schema-detail"}
+
+        @get("/user/health-records", guards=[require_api_key])
+        async def health_records_route() -> dict:
+            return {"message": "health-records"}
+
+        app = Litestar(
+            route_handlers=[get_schema_route, health_records_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=False,
+                        # exclude_paths intentionally omitted -- exercises the
+                        # class defaults, not a caller-supplied override.
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            schema_response = client.get("/api/schemas/1")
+            health_response = client.get("/user/health-records")
+
+        # Both routes are guarded and no key was sent. If the (unanchored)
+        # defaults still matched these paths as substrings, the middleware
+        # would be bypassed, request.state.api_key would never be set, and
+        # the guard would 401 -- indistinguishable at this assertion from a
+        # working guard. The real proof is in the next test: a *valid* key
+        # must be honored on these paths, which only happens if the
+        # middleware actually ran.
+        assert schema_response.status_code == 401
+        assert health_response.status_code == 401
+
+    @pytest.mark.integration
+    async def test_default_exclude_paths_still_enforce_auth_with_valid_key(
+        self, seeded_backend: MemoryBackend, test_api_key: tuple[str, str, APIKeyInfo]
+    ) -> None:
+        """A valid key must still authenticate on paths that merely resemble the defaults.
+
+        Uses a *valid* key and asserts success -- a 401 alone (as in the
+        previous test) can't distinguish "guard correctly rejected an
+        authenticated request" from "middleware never ran, state.api_key
+        stayed unset, guard rejected for the wrong reason." Success here
+        proves the middleware actually processed the request.
+        """
+        raw_key, _, _ = test_api_key
+
+        @get("/api/schemas/1", guards=[require_api_key])
+        async def get_schema_route() -> dict:
+            return {"message": "schema-detail"}
+
+        @get("/user/health-records", guards=[require_api_key])
+        async def health_records_route() -> dict:
+            return {"message": "health-records"}
+
+        app = Litestar(
+            route_handlers=[get_schema_route, health_records_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=False,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            schema_response = client.get("/api/schemas/1", headers={"X-API-Key": raw_key})
+            health_response = client.get("/user/health-records", headers={"X-API-Key": raw_key})
+
+        assert schema_response.status_code == 200
+        assert schema_response.json() == {"message": "schema-detail"}
+        assert health_response.status_code == 200
+        assert health_response.json() == {"message": "health-records"}
+
+    @pytest.mark.integration
+    async def test_default_exclude_paths_still_exclude_actual_schema_and_health_routes(
+        self, seeded_backend: MemoryBackend
+    ) -> None:
+        """Anchoring the defaults must not regress their original purpose.
+
+        The literal ``/health`` path, and the OpenAPI schema routes Litestar
+        registers under ``/schema`` (e.g. ``/schema/openapi.json``), must
+        remain excluded -- with no API key at all -- since that's the whole
+        point of shipping these two paths as defaults.
+        """
+
+        @get("/health")
+        async def health_route() -> dict:
+            return {"status": "ok"}
+
+        app = Litestar(
+            route_handlers=[health_route],
+            plugins=[
+                APIAuthPlugin(
+                    config=APIAuthConfig(
+                        backend=seeded_backend,
+                        auto_routes=False,
+                    )
+                )
+            ],
+        )
+
+        with TestClient(app) as client:
+            health_response = client.get("/health")
+            schema_response = client.get("/schema/openapi.json")
+
+        assert health_response.status_code == 200
+        assert schema_response.status_code == 200
+
 
 class TestScopeGuardsIntegration:
     """Test scope-based authorization guards."""
