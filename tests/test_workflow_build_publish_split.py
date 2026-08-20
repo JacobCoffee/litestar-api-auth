@@ -109,9 +109,9 @@ class TestPublishWorkflowSplitsBuildFromPublish:
                 "consume the artifact from) the build job"
             )
 
-            assert _permissions(block) == {
-                "id-token": "write"
-            }, f"publish.yml: job {job_name!r} must hold exactly {{'id-token': 'write'}} and no other permission scope"
+            assert _permissions(block) == {"id-token": "write"}, (
+                f"publish.yml: job {job_name!r} must hold exactly {{'id-token': 'write'}} and no other permission scope"
+            )
 
             assert not _RUN_RE.search(block), (
                 f"publish.yml: job {job_name!r} holds id-token: write but has a 'run:' "
@@ -130,9 +130,9 @@ class TestPublishWorkflowSplitsBuildFromPublish:
         jobs = _job_blocks(PUBLISH_WORKFLOW.read_text())
         build_job = jobs.get("build")
         assert build_job is not None, "publish.yml: expected a 'build' job"
-        assert (
-            "id-token" not in build_job
-        ), "publish.yml: the 'build' job -- which runs 'uv build' -- must not hold any id-token permission"
+        assert "id-token" not in build_job, (
+            "publish.yml: the 'build' job -- which runs 'uv build' -- must not hold any id-token permission"
+        )
         assert "uv build" in build_job, "publish.yml: 'build' job no longer builds the package"
 
 

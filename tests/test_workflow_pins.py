@@ -158,6 +158,6 @@ class TestWorkflowActionsArePinned:
         for ref in refs:
             action, _, pinned = ref.partition("@")
             assert pinned, f"{workflow_path.name}: {action} has no pinned ref at all"
-            assert _FULL_SHA_RE.match(
-                pinned
-            ), f"{workflow_path.name}: {action} is pinned to {pinned!r}, not a full commit SHA"
+            assert _FULL_SHA_RE.match(pinned), (
+                f"{workflow_path.name}: {action} is pinned to {pinned!r}, not a full commit SHA"
+            )
