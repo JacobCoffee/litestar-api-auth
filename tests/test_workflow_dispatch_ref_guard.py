@@ -116,9 +116,9 @@ class TestWorkflowDispatchIsRestrictedToTagRefs:
             "workflow_dispatch runs to tag refs, so it could still run against an "
             "arbitrary branch"
         )
-        assert (
-            "github.event_name == 'release'" in condition
-        ), f"publish.yml: 'build' job condition {condition!r} no longer explicitly allows the normal 'release' trigger"
+        assert "github.event_name == 'release'" in condition, (
+            f"publish.yml: 'build' job condition {condition!r} no longer explicitly allows the normal 'release' trigger"
+        )
 
     @pytest.mark.unit
     def test_publish_release_job_depends_on_build_with_no_override(self) -> None:

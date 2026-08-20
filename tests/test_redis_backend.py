@@ -945,14 +945,14 @@ class TestRedisBackendList:
         assert recreated
 
         remaining = await client.smembers(redis_backend._all_keys_key)
-        assert (
-            hashed_key in remaining
-        ), "key recreated during list()'s stale-entry cleanup must remain in the all_keys tracking set"
+        assert hashed_key in remaining, (
+            "key recreated during list()'s stale-entry cleanup must remain in the all_keys tracking set"
+        )
 
         result = await redis_backend.list()
-        assert any(
-            k.key_hash == hashed_key for k in result
-        ), "recreated key must be visible in list() output, not permanently orphaned"
+        assert any(k.key_hash == hashed_key for k in result), (
+            "recreated key must be visible in list() output, not permanently orphaned"
+        )
 
     async def test_list_cleanup_aborts_via_watch_when_recreated_before_exec(self, redis_backend: RedisBackend) -> None:
         """Regression test for the WATCH-protected window in list()'s cleanup.
@@ -1022,9 +1022,9 @@ class TestRedisBackendList:
         assert triggered
 
         remaining = await client.smembers(redis_backend._all_keys_key)
-        assert (
-            hashed_key in remaining
-        ), "WATCH must abort the cleanup transaction when the key is recreated between the re-check GET and EXEC"
+        assert hashed_key in remaining, (
+            "WATCH must abort the cleanup transaction when the key is recreated between the re-check GET and EXEC"
+        )
 
     async def test_list_cleanup_response_error_does_not_leak_hash(self, redis_backend: RedisBackend) -> None:
         """A Redis-level pipeline failure in list()'s stale-cleanup must not embed key_hash either.
@@ -1082,9 +1082,9 @@ class TestRedisBackendList:
         # exception because there is no propagated exception at all.
         assert result == []
         remaining = await client.smembers(redis_backend._all_keys_key)
-        assert (
-            hashed_key in remaining
-        ), "cleanup left the tracking entry alone after a ResponseError, same as WatchError"
+        assert hashed_key in remaining, (
+            "cleanup left the tracking entry alone after a ResponseError, same as WatchError"
+        )
 
 
 class TestRedisBackendRevoke:
@@ -1771,6 +1771,6 @@ class TestRedisBackendIntegration:
 
         final = await redis_backend.get(hashed_key)
         assert final is not None
-        assert (
-            final.last_used_at == newer
-        ), "a stale update_last_used() retry must not roll last_used_at backward past a newer concurrent write"
+        assert final.last_used_at == newer, (
+            "a stale update_last_used() retry must not roll last_used_at backward past a newer concurrent write"
+        )

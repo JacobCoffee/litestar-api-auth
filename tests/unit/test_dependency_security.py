@@ -194,9 +194,9 @@ def test_installed_multipart_above_vulnerable_versions() -> None:
     except importlib.metadata.PackageNotFoundError:
         pytest.skip("multipart not installed")
 
-    assert (
-        installed_version >= _MULTIPART_MIN_VERSION
-    ), f"multipart {installed_version} is vulnerable to PYSEC-2026-2670; run `uv sync` to match the updated lock file."
+    assert installed_version >= _MULTIPART_MIN_VERSION, (
+        f"multipart {installed_version} is vulnerable to PYSEC-2026-2670; run `uv sync` to match the updated lock file."
+    )
 
 
 _TRANSITIVE_MIN_VERSIONS = {
@@ -295,9 +295,9 @@ def test_installed_transitive_dependency_above_vulnerable_version(
     except importlib.metadata.PackageNotFoundError:
         pytest.skip(f"{package_name} not installed")
 
-    assert (
-        installed_version >= min_version
-    ), f"{package_name} {installed_version} is vulnerable to {advisory}; run `uv sync` to match the updated lock file."
+    assert installed_version >= min_version, (
+        f"{package_name} {installed_version} is vulnerable to {advisory}; run `uv sync` to match the updated lock file."
+    )
 
 
 @pytest.mark.parametrize(("package_name", "spec"), sorted(_TRANSITIVE_MIN_VERSIONS.items()))
@@ -378,9 +378,9 @@ def test_installed_pytest_above_vulnerable_versions() -> None:
     upgraded).
     """
     installed_version = Version(importlib.metadata.version("pytest"))
-    assert (
-        installed_version >= _PYTEST_MIN_VERSION
-    ), f"pytest {installed_version} is vulnerable to PYSEC-2026-1845; run `uv sync` to match the updated lock file."
+    assert installed_version >= _PYTEST_MIN_VERSION, (
+        f"pytest {installed_version} is vulnerable to PYSEC-2026-1845; run `uv sync` to match the updated lock file."
+    )
 
 
 def test_pyproject_pytest_floor_excludes_vulnerable_versions() -> None:
@@ -497,9 +497,9 @@ def test_pyproject_dependencies_floor_excludes_vulnerable_transitive_version(
 
     lower_bounds = [spec_item.version for spec_item in req.specifier if spec_item.operator in (">=", ">", "==", "~=")]
     assert lower_bounds, f"{package_name} requirement {req!r} has no lower-bound specifier"
-    assert all(
-        Version(bound) >= min_version for bound in lower_bounds
-    ), f"pyproject.toml's {package_name} requirement is {req!r}, which still permits versions vulnerable to {advisory}"
+    assert all(Version(bound) >= min_version for bound in lower_bounds), (
+        f"pyproject.toml's {package_name} requirement is {req!r}, which still permits versions vulnerable to {advisory}"
+    )
 
 
 _MAKO_MIN_VERSION = Version("1.3.12")
