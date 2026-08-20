@@ -8,8 +8,11 @@ Uses an async in-memory SQLite database via aiosqlite.
 from __future__ import annotations
 
 import asyncio
+import io
+import logging
 import traceback
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from sqlalchemy import delete as sa_delete
@@ -75,6 +78,61 @@ def _patch_second_execute_to_reuse_id(
                 )
                 await raw_session.commit()
         return await original_execute(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", patched_execute)
+    return calls
+
+
+def _patch_first_execute_to_insert_concurrent_row(
+    monkeypatch: pytest.MonkeyPatch,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    key_hash: str,
+) -> list[int]:
+    """Simulate a concurrent create(): commit a fresh row with ``key_hash`` right
+    after the operation under test's UPDATE round trip completes.
+
+    An ``UPDATE ... WHERE key_hash = :hash`` that matches zero rows (no key with
+    this hash exists yet) followed by a re-read ``SELECT ... WHERE key_hash =
+    :hash`` in the same transaction issues its write as one database round trip
+    and its re-read as a later, separate one. This patches ``AsyncSession.execute``
+    so that, right after that first round trip (the UPDATE) returns, a row with
+    the exact same key_hash is committed by a concurrent session -- exactly the
+    ``create()`` race the finding describes. The re-read then proceeds against
+    whatever the table looks like at that point.
+
+    An implementation that checks ``rowcount`` after the UPDATE and bails out
+    before ever issuing the re-read when it is 0 never lets that re-read observe
+    the row this hook plants.
+
+    Returns:
+        A one-element list holding the running count of ``AsyncSession.execute``
+        calls, updated in place so the caller can assert on it after the fact.
+    """
+    original_execute = AsyncSession.execute
+    calls = [0]
+    fired = [False]
+
+    async def patched_execute(self: AsyncSession, *args: object, **kwargs: object):
+        calls[0] += 1
+        result = await original_execute(self, *args, **kwargs)
+        # Fire exactly once, right after the first round trip (the UPDATE)
+        # completes -- this is the exact window the finding describes, between
+        # the UPDATE returning and the follow-up SELECT re-read.
+        if calls[0] == 1 and not fired[0]:
+            fired[0] = True
+            async with sessionmaker() as raw_session:
+                raw_session.add(
+                    APIKeyModel(
+                        key_id="concurrently-created",
+                        key_hash=key_hash,
+                        name="Concurrently Created Key",
+                        scopes=["read"],
+                        is_active=True,
+                    )
+                )
+                await raw_session.commit()
+        return result
 
     monkeypatch.setattr(AsyncSession, "execute", patched_execute)
     return calls
@@ -628,6 +686,51 @@ class TestSQLAlchemyBackendUpdate:
         assert exc_info.value.__cause__ is None
         assert exc_info.value.__context__ is None
 
+    async def test_update_does_not_leak_hash_on_commit_statement_error(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a DB failure at COMMIT time during update() is sanitized like every other DB failure here.
+
+        Regression test for a commit-time failure (a dropped connection, lock
+        timeout, or a deferred-constraint violation firing at COMMIT) during
+        ``backend.update(key_hash, ...)``. Before the fix, ``session.commit()``
+        was called from the ``try``'s ``else`` suite -- outside the ``except
+        StatementError`` sanitizer -- so a ``StatementError``/``OperationalError``
+        raised by commit() propagated straight to the caller as a raw
+        SQLAlchemy exception instead of the generic ``RuntimeError`` every
+        other DB failure in this module is converted to. This module's
+        deliberate error contract requires every DB failure to be sanitized
+        this way, not only the ones that happen to bind key_hash as a SQL
+        parameter (this synthetic StatementError models the worst case, as if
+        it were still carrying key_hash from an earlier statement in the same
+        transaction, so the test also re-confirms that the hash never leaks
+        via the exception chain).
+        """
+        _, hashed_key = generate_api_key("test_")
+        key_info = APIKeyInfo(key_id="test-123", key_hash=hashed_key, name="Test Key", scopes=["read"])
+        await sa_backend.create(hashed_key, key_info)
+
+        async def fake_commit(self: AsyncSession, *args: object, **kwargs: object) -> None:
+            raise StatementError(
+                "connection reset",
+                "UPDATE api_keys SET name = ? WHERE api_keys.key_hash = ?",
+                ("New Name", hashed_key),
+                Exception("connection reset"),
+            )
+
+        monkeypatch.setattr(AsyncSession, "commit", fake_commit)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await sa_backend.update(hashed_key, name="New Name")
+
+        rendered = "".join(
+            traceback.format_exception(type(exc_info.value), exc_info.value, exc_info.value.__traceback__)
+        )
+        assert hashed_key not in rendered
+        assert hashed_key not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
     async def test_update_aba_race_cannot_mutate_reused_id_row(
         self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -690,6 +793,47 @@ class TestSQLAlchemyBackendUpdate:
         if key_b_after is not None:
             assert key_b_after.name == "Reused-ID Key"
             assert key_b_after.is_active is True
+
+    async def test_update_zero_match_does_not_adopt_concurrently_created_row(
+        self, sa_backend: SQLAlchemyBackend, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that a zero-match update() never reports a concurrently created row as its own result.
+
+        Regression test for the reported race: ``update(key_hash, ...)`` issues an
+        ``UPDATE ... WHERE key_hash = :hash`` that matches zero rows (no key with
+        this hash exists yet at the time the call is made), then re-reads by that
+        same key_hash inside the same transaction. Before the fix, that re-read ran
+        unconditionally regardless of whether the UPDATE matched anything, so a
+        concurrent ``create()`` that commits a row with the exact same key_hash
+        between the UPDATE and the SELECT let the SELECT observe that unrelated,
+        never-updated row as if it were this call's result. Via ``revoke()``, this
+        meant reporting ``True`` -- and the key remaining fully active -- even
+        though the UPDATE never touched it. The fix checks ``rowcount`` right after
+        the UPDATE and returns ``None`` before the re-read ever runs when it is 0.
+        """
+        _, hashed_key = generate_api_key("race_")
+
+        sessionmaker = sa_backend._sessionmaker
+        assert sessionmaker is not None
+
+        # No key with this hash exists yet -- the UPDATE inside revoke() below
+        # is guaranteed to match zero rows.
+        _patch_first_execute_to_insert_concurrent_row(monkeypatch, sessionmaker, key_hash=hashed_key)
+
+        result = await sa_backend.revoke(hashed_key)
+        monkeypatch.undo()
+
+        # The UPDATE matched nothing, so revoke() must report False -- never True,
+        # even though a row with this exact key_hash exists by the time the call
+        # returns (it was created concurrently, never updated by this call).
+        assert result is False
+
+        # The concurrently created row must be completely untouched: still active,
+        # exactly as create() wrote it, never mutated by this update()/revoke() call.
+        concurrent_row = await sa_backend.get(hashed_key)
+        assert concurrent_row is not None
+        assert concurrent_row.is_active is True
+        assert concurrent_row.key_id == "concurrently-created"
 
 
 class TestSQLAlchemyBackendDelete:
@@ -1015,6 +1159,75 @@ class TestSQLAlchemyBackendUpdateLastUsed:
         assert second_time is not None
         assert second_time >= first_time
 
+    async def test_update_last_used_does_not_move_backward(self, sa_backend: SQLAlchemyBackend) -> None:
+        """A stale write must not roll last_used_at backward.
+
+        Regression test for a race where update_last_used() captures
+        datetime.now() before its UPDATE commits: a slow request that captured
+        an older timestamp can still commit *after* a faster, later-timestamped
+        request already wrote its newer value, and must not clobber it with its
+        own stale one.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await sa_backend.create(hashed_key, key_info)
+
+        newer = datetime.now(timezone.utc)
+        older = newer - timedelta(seconds=5)
+
+        # Simulate the newer timestamp's request committing first.
+        await sa_backend.update(hashed_key, last_used_at=newer)
+        # Simulate the slower request's delayed write, carrying its stale, older timestamp.
+        await sa_backend.update(hashed_key, last_used_at=older)
+
+        retrieved = await sa_backend.get(hashed_key)
+        assert retrieved is not None
+        assert retrieved.last_used_at == newer
+
+    async def test_update_last_used_normalizes_non_utc_offset_to_utc(self, sa_backend: SQLAlchemyBackend) -> None:
+        """The monotonicity guard must not bypass DateTimeUTC's UTC normalization.
+
+        Regression test: the guard reuses the incoming datetime as both the
+        CASE's comparison operand and its THEN value. If that value is passed
+        as a bare Python datetime instead of an explicitly typed bind, the THEN
+        branch binds as a plain, untyped literal -- silently skipping
+        DateTimeUTC's bind processor for that one bind -- and the CASE
+        expression's own result type then gets inferred from that untyped
+        literal rather than from the compared column. A tz-aware datetime
+        expressed in a non-UTC offset would then be stored under its raw,
+        un-normalized wall-clock value instead of its correct UTC instant --
+        corrupting the timestamp even though it is genuinely newer than what
+        was stored before.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        key_info = APIKeyInfo(
+            key_id="test-123",
+            key_hash=hashed_key,
+            name="Test Key",
+            scopes=["read"],
+        )
+        await sa_backend.create(hashed_key, key_info)
+
+        baseline = datetime(2026, 1, 1, 16, 0, tzinfo=timezone.utc)
+        await sa_backend.update(hashed_key, last_used_at=baseline)
+
+        # This instant (17:00 UTC) is genuinely newer than baseline (16:00 UTC),
+        # but expressed in a -05:00 offset so its wall-clock hour (12) would be
+        # mistaken for an earlier UTC time if normalization were skipped.
+        incoming = datetime(2026, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5)))
+        await sa_backend.update(hashed_key, last_used_at=incoming)
+
+        retrieved = await sa_backend.get(hashed_key)
+        assert retrieved is not None
+        assert retrieved.last_used_at == incoming.astimezone(timezone.utc)
+
 
 class TestSQLAlchemyBackendCustomTableIsolation:
     """Tests that a custom ``table_name`` backend only ever touches its own table.
@@ -1312,3 +1525,174 @@ class TestSQLAlchemyBackendIntegration:
 
         value_errors = [r for r in results if isinstance(r, ValueError)]
         assert len(value_errors) >= 1, f"Expected at least one ValueError, got: {[type(r).__name__ for r in results]}"
+
+
+class TestSQLAlchemyBackendSQLLogging:
+    """Tests for the operational-logging exposure documented on ``SQLAlchemyBackend``.
+
+    ``key_hash`` is bound as a SQL parameter on every ``create()``/``get()``/
+    ``update()``/``delete()`` call. SQLAlchemy engines default to
+    ``hide_parameters=False``, so a deployment that enables ``echo=True`` on
+    its engine (or raises the ``sqlalchemy.engine.Engine`` logger to
+    ``INFO`` for debugging) writes the exact stored verifier to its logs.
+    This backend never modifies the logging configuration of the
+    caller-provided engine -- see the ``Warning`` section on
+    :class:`SQLAlchemyBackend`. The library's lever here is documentation:
+    direct deployments that treat key hashes as sensitive to construct their
+    engine with ``hide_parameters=True`` (which covers bound parameters, but
+    -- see below -- not ``echo="debug"``'s result-row logging).
+    """
+
+    @staticmethod
+    async def _create_and_get_with_engine_logging(*, hide_parameters: bool | None, hashed_key: str) -> str:
+        """Run a create()+get() round trip on a fresh engine, capturing its SQL log output.
+
+        A dedicated engine (rather than the ``sa_backend`` fixture) is built
+        per call so each test controls ``hide_parameters`` independently, and
+        a real ``logging.Handler`` is attached to the
+        ``sqlalchemy.engine.Engine`` logger (rather than ``caplog``) because
+        SQLAlchemy's ``echo`` machinery calls the logger's ``_log()``
+        directly -- this still propagates through normal handler dispatch,
+        but exercising the real handler path here is closer to how an
+        operator's own logging config would observe it.
+
+        Args:
+            hide_parameters: The ``hide_parameters`` engine setting under test.
+                ``None`` omits the keyword entirely so the engine is built
+                under SQLAlchemy's own default, rather than this test
+                hardcoding what that default currently is.
+            hashed_key: The key hash to create and then look up.
+
+        Returns:
+            Everything the ``sqlalchemy.engine.Engine`` logger emitted at
+            INFO during the round trip.
+        """
+        logger = logging.getLogger("sqlalchemy.engine.Engine")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        previous_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            engine_kwargs: dict[str, Any] = {
+                "echo": True,
+                "poolclass": StaticPool,
+                "connect_args": {"check_same_thread": False},
+            }
+            if hide_parameters is not None:
+                engine_kwargs["hide_parameters"] = hide_parameters
+            engine = create_async_engine("sqlite+aiosqlite://", **engine_kwargs)
+            config = SQLAlchemyConfig(engine=engine, create_tables=True)
+            backend = SQLAlchemyBackend(config=config)
+            await backend.startup()
+            try:
+                await backend.create(
+                    hashed_key,
+                    APIKeyInfo(key_id="log-test", key_hash=hashed_key, name="Log Test", scopes=["read"]),
+                )
+                await backend.get(hashed_key)
+            finally:
+                await backend.close()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        return stream.getvalue()
+
+    async def test_default_engine_config_leaks_key_hash_to_sql_logs(self) -> None:
+        """Reproduce the finding: SQLAlchemy's actual default ``hide_parameters`` + echo/INFO logging exposes key_hash.
+
+        ``hide_parameters`` is deliberately left unset here (rather than
+        passed explicitly as ``False``) so this exercises whatever
+        SQLAlchemy's own default actually is. Pins the exact failure
+        scenario the finding describes (an operator enabling ``echo=True``
+        or INFO-level engine logging for debugging) so a future SQLAlchemy
+        release that silently changes that default would be caught here
+        rather than only in a real deployment's logs.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        output = await self._create_and_get_with_engine_logging(hide_parameters=None, hashed_key=hashed_key)
+
+        assert hashed_key in output
+
+    async def test_hide_parameters_true_closes_the_statement_parameter_leak(self) -> None:
+        """The documented mitigation works for *bound parameters*: ``hide_parameters=True`` redacts key_hash.
+
+        Regression test for the fix: both ``docs/usage/backends.md`` and the
+        ``SQLAlchemyBackend`` docstring now direct deployments that treat
+        key_hash as sensitive to set ``hide_parameters=True`` on their
+        engine. This proves that guidance genuinely closes the exposure
+        reproduced by ``test_default_engine_config_leaks_key_hash_to_sql_logs``
+        above, rather than merely asserting the docs say so.
+
+        Asserts SQLAlchemy's own redaction marker is present (not just that
+        ``hashed_key`` is absent) so this can't pass vacuously if log
+        capture silently stopped working for some unrelated reason.
+
+        Scoped deliberately to ``echo=True`` (statement/parameter logging):
+        see ``test_hide_parameters_true_does_not_hide_key_hash_in_debug_echo_rows``
+        below for the separate, *not* fully mitigated row-echo case.
+        """
+        _, hashed_key = generate_api_key("test_")
+
+        output = await self._create_and_get_with_engine_logging(hide_parameters=True, hashed_key=hashed_key)
+
+        assert hashed_key not in output
+        assert "hide_parameters=True" in output
+
+    async def test_hide_parameters_true_does_not_hide_key_hash_in_debug_echo_rows(self) -> None:
+        """``hide_parameters=True`` does not cover ``echo="debug"``'s result-row logging.
+
+        ``hide_parameters`` only redacts *bound statement parameters* it does
+        not touch *result rows*. ``get()`` selects the ``key_hash`` column
+        back out of the table, and SQLAlchemy's ``echo="debug"`` mode (a
+        stronger setting than ``echo=True``) logs every fetched row via
+        ``Row(...)`` reprs -- including ``key_hash`` -- independent of
+        ``hide_parameters``. This pins that residual gap so the docs'
+        guidance to avoid ``echo="debug"``/``DEBUG``-level engine logging
+        entirely (not just set ``hide_parameters=True``) stays accurate.
+        """
+        logger = logging.getLogger("sqlalchemy.engine.Engine")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        previous_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            engine = create_async_engine(
+                "sqlite+aiosqlite://",
+                echo="debug",
+                hide_parameters=True,
+                poolclass=StaticPool,
+                connect_args={"check_same_thread": False},
+            )
+            config = SQLAlchemyConfig(engine=engine, create_tables=True)
+            backend = SQLAlchemyBackend(config=config)
+            await backend.startup()
+            try:
+                _, hashed_key = generate_api_key("test_")
+                await backend.create(
+                    hashed_key,
+                    APIKeyInfo(key_id="debug-row-test", key_hash=hashed_key, name="Debug Row Test", scopes=["read"]),
+                )
+                await backend.get(hashed_key)
+            finally:
+                await backend.close()
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+
+        assert hashed_key in stream.getvalue()
+
+    def test_backend_docstring_documents_hide_parameters_mitigation(self) -> None:
+        """The library's only lever for this finding is documentation -- verify it exists.
+
+        This is the literal regression test for the fix applied here: before
+        it, ``SQLAlchemyBackend.__doc__`` said nothing about SQL engine
+        logging, so this assertion would have failed.
+        """
+        doc = SQLAlchemyBackend.__doc__ or ""
+
+        assert "hide_parameters=True" in doc
+        assert "echo=True" in doc
+        assert 'echo="debug"' in doc

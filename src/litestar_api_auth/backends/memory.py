@@ -248,13 +248,23 @@ class MemoryBackend(APIKeyBackend):
         result = await self.update(key_hash, is_active=False)
         return result is not None
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
+
+        Returns the freshly updated record when the key still exists, so
+        callers can detect a concurrent revoke() (or an expiry shortened by
+        a concurrent update()) that landed between their earlier get() and
+        this call -- see ``APIKeyBackend.update_last_used``. A ``None``
+        return is ambiguous: it also covers the key having been deleted
+        concurrently, which is therefore not distinguishable this way.
 
         Args:
             key_hash: SHA-256 hash of the API key
+
+        Returns:
+            The updated APIKeyInfo if found, None otherwise.
         """
-        await self.update(
+        return await self.update(
             key_hash,
             last_used_at=datetime.now(timezone.utc),
         )

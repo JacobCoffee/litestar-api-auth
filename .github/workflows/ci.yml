@@ -73,6 +73,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
+          version: "0.9.11"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -82,10 +83,22 @@ jobs:
       - name: Export locked dependencies
         run: uv export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt
 
+      # pypa/gh-action-pip-audit is SHA-pinned, but the action itself always
+      # runs `pip install -r <action's requirements.txt>`, which floats on
+      # `pip-audit ~=2.0,>=2.5.6` regardless of the action pin. Pre-installing
+      # an exact-pinned pip-audit into a venv and pointing the action at it
+      # via `virtual-environment` makes that install a no-op (the constraint
+      # is already satisfied), so the audit actually runs a pinned version.
+      - name: Pin pip-audit version
+        run: |
+          uv venv .venv-pip-audit
+          uv pip install --python .venv-pip-audit pip-audit==2.10.1
+
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
         with:
           inputs: requirements-audit.txt
+          virtual-environment: .venv-pip-audit
 
   # ==================================================================================== #
   # VALIDATE (lint, format, type-check in one job)
@@ -105,6 +118,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
+          version: "0.9.11"
 
       - name: Create virtual environment
         run: uv sync --all-extras --dev --locked
@@ -149,6 +163,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
+          version: "0.9.11"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -193,6 +208,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
+          version: "0.9.11"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0

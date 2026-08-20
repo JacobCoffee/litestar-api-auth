@@ -393,6 +393,92 @@ class TestUpdateLastUsedRevocationRaceIsNotSwallowed:
         assert scope["state"]["api_key"] is None
 
 
+class TestRealBackendClosesUpdateLastUsedRevocationRace:
+    """Regression tests for the revocation-handoff race finding (Codex).
+
+    Unlike ``TestUpdateLastUsedRevocationRaceIsNotSwallowed`` above (which
+    proves the middleware *reacts correctly* to a hand-rolled race-aware
+    backend), these tests exercise the real, shipped ``MemoryBackend`` and
+    reproduce the exact interleaving from the finding: ``backend.get()``
+    returns an active snapshot, then a concurrent ``revoke()`` commits
+    before ``update_last_used()`` runs moments later in the same request.
+
+    Before the fix, ``MemoryBackend.update_last_used()`` (like the Redis and
+    SQLAlchemy backends) discarded its own return value entirely, so the
+    middleware kept trusting the stale, pre-revocation ``key_info`` snapshot
+    and authenticated the request anyway. After the fix, ``update_last_used()``
+    returns the freshly written record, which the middleware re-validates --
+    closing the race for a concurrent revoke(), though a concurrent delete()
+    in the same window is still not caught (see the "Revocation timing"
+    section of ``APIKeyMiddleware``'s docstring for why).
+    """
+
+    async def test_concurrent_revoke_between_get_and_update_last_used_is_caught(self) -> None:
+        """A revoke() landing right after backend.get() but before
+        update_last_used() must not leave the request authenticated.
+        """
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="raced-revoke", key_hash=key_hash, name="Raced", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        # Simulate a concurrent request's revoke() landing in the exact
+        # window the finding describes: right after this request's
+        # backend.get() call has captured its (still-active) snapshot, but
+        # before update_last_used() runs a few lines later in __call__.
+        original_get = backend.get
+
+        async def get_then_race_revoke(key_hash_arg: str) -> APIKeyInfo | None:
+            info = await original_get(key_hash_arg)
+            await backend.revoke(key_hash_arg)
+            return info
+
+        backend.get = get_then_race_revoke  # type: ignore[method-assign]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        # Before the fix this was the stale, pre-revocation active snapshot.
+        assert scope["state"]["api_key"] is None
+
+    async def test_concurrent_expiry_shortening_between_get_and_update_last_used_is_caught(self) -> None:
+        """An update() that shortens expires_at in the same window must
+        also be caught, not just a revoke().
+        """
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(
+                key_id="raced-expiry",
+                key_hash=key_hash,
+                name="Raced Expiry",
+                scopes=["read:users"],
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        original_get = backend.get
+
+        async def get_then_race_shorten_expiry(key_hash_arg: str) -> APIKeyInfo | None:
+            info = await original_get(key_hash_arg)
+            await backend.update(key_hash_arg, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            return info
+
+        backend.get = get_then_race_shorten_expiry  # type: ignore[method-assign]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert scope["state"]["api_key"] is None
+
+
 class TestApiKeyHashIsRedactedFromState:
     """Regression test: ``request.state.api_key`` must never carry the real
     ``key_hash``.
@@ -603,6 +689,47 @@ class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedBackendError:
         assert frame_locals.get("key_info") is None
 
 
+class _ExplodingHashMiddleware(APIKeyMiddleware):
+    """Middleware whose ``_hash_api_key`` raises unexpectedly, simulating a
+    bug in the hashing step itself (as opposed to the backend lookup or the
+    post-lookup validity checks already covered above).
+    """
+
+    def _hash_api_key(self, api_key: str) -> str:
+        msg = "hash failed"
+        raise RuntimeError(msg)
+
+
+class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedHashError:
+    """Regression test: an *unexpected* error raised by ``_hash_api_key``
+    itself -- before the raw key has even been hashed and dropped -- must
+    not leave it reachable from ``_validate_api_key``'s locals while it
+    propagates.
+
+    Before the fix, ``key_hash = self._hash_api_key(api_key)`` was not
+    guarded: if ``_hash_api_key`` raised, execution never reached the
+    ``del api_key`` on the following line, so ``api_key`` stayed bound as
+    this frame's local for the rest of the exception's life.
+    """
+
+    async def test_raw_key_not_in_validate_api_key_locals_when_hash_raises_unexpectedly(self) -> None:
+        backend = MemoryBackend()
+        middleware = _ExplodingHashMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        raw_key, _key_hash = generate_api_key(prefix="test_")
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(RuntimeError, match="hash failed") as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_validate_api_key_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware._validate_api_key's frame"
+        # api_key is declared `str` (not `str | None`), so the scrub here is
+        # "" rather than None -- either way, the raw key itself is gone.
+        assert frame_locals.get("api_key") == ""
+
+
 class _KeyInfoWithExplodingIsExpired:
     """Stand-in for ``APIKeyInfo`` whose ``is_expired`` property raises
     unexpectedly, simulating a bug in a backend's expiry-tracking data (e.g.
@@ -644,7 +771,9 @@ class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedPostLookupError:
     handler (rather than deleting ``api_key`` as soon as it is hashed, before
     the lookup) would still leave ``api_key`` bound in this frame for this
     scenario, since the exception occurs after that ``try``/``except`` block
-    has already exited successfully.
+    has already exited successfully. ``key_hash``/``key_info`` are checked
+    too: they are the SHA-256 verifier and the (still-unredacted) backend
+    record, both treated as sensitive elsewhere in this class.
     """
 
     async def test_raw_key_not_in_validate_api_key_locals_when_is_expired_raises_unexpectedly(self) -> None:
@@ -665,6 +794,71 @@ class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedPostLookupError:
 
         assert frame_locals is not None, "traceback did not include APIKeyMiddleware._validate_api_key's frame"
         assert frame_locals.get("api_key") is None
+        assert frame_locals.get("key_hash") is None
+        assert frame_locals.get("key_info") is None
+
+
+class _NonStructKeyInfo:
+    """Stand-in for ``APIKeyInfo`` that duck-types its way past
+    ``_check_key_info_is_valid`` (matching ``has_valid_types``/``is_active``/
+    ``is_expired``/``key_id``) but is not an actual ``msgspec.Struct``, so
+    ``msgspec.structs.replace()`` raises ``TypeError`` against it.
+
+    Simulates a custom ``APIKeyBackend`` implementation returning its own
+    record type that satisfies the ``APIKeyBackend``/validation duck-typing
+    contract without being built from ``msgspec.Struct``.
+    """
+
+    has_valid_types = True
+    is_active = True
+    is_expired = False
+    key_id = "good"
+
+
+class _NonStructBackend(MemoryBackend):
+    """A backend whose ``get()`` succeeds and returns a valid-looking but
+    non-``msgspec.Struct`` ``key_info``, so ``__call__``'s ``else`` clause
+    (not the ``try`` it is attached to) is what raises.
+    """
+
+    async def get(self, key_hash: str) -> APIKeyInfo | None:
+        return _NonStructKeyInfo()  # type: ignore[return-value]
+
+
+class TestRawApiKeyScrubbedFromLocalsOnUnexpectedElseClauseError:
+    """Regression test: an *unexpected* error raised while building the
+    redacted ``state["api_key"]`` value -- in the ``else`` clause of
+    ``__call__``'s ``try``/``except``/``else`` -- must not leave the raw
+    ``api_key`` reachable from ``__call__``'s locals while it propagates.
+
+    Exceptions raised in an ``else`` clause are *not* caught by the
+    ``except`` clauses attached to that same ``try`` statement (this is
+    plain Python control-flow, not a bug specific to this class), so the
+    existing ``except BaseException: ... scrub ...; raise`` above the
+    ``else`` clause does not run for this case. Before the fix, this left
+    ``api_key`` bound in ``__call__``'s frame for a ``TypeError`` raised by
+    ``msgspec.structs.replace()`` against a non-``msgspec.Struct`` ``key_info``.
+    """
+
+    async def test_raw_key_not_in_locals_when_else_clause_raises_unexpectedly(self) -> None:
+        backend = _NonStructBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend, update_last_used=False)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(TypeError) as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_middleware_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware.__call__'s frame"
+        assert frame_locals.get("api_key") is None
+        assert frame_locals.get("key_info") is None
 
 
 class TestRevocationTimingIsDocumented:
@@ -736,3 +930,64 @@ class TestRevocationTimingIsDocumented:
         # hypothetical retry of this same request -- must be rejected.
         with pytest.raises(APIKeyRevokedError):
             await middleware._validate_api_key(raw_key)
+
+    async def test_guard_reads_pre_revocation_snapshot_through_full_middleware_call(self) -> None:
+        """End-to-end version of the race, through ``APIKeyMiddleware.__call__``
+        and ``guards.get_api_key_info`` (not ``_validate_api_key`` directly).
+
+        The downstream ASGI app stands in for a guard followed by a handler:
+        it reads ``request.state.api_key`` via ``get_api_key_info`` (as
+        ``require_scope``/``require_scopes`` do), *then* a concurrent request
+        revokes the key and drops one of its scopes, then the same downstream
+        app reads ``get_api_key_info`` again to simulate the handler's own
+        access later in the same request. Both reads, despite the revocation
+        landing in between, must return the original active key with its
+        original scopes -- proving the guarantee holds through the guard
+        layer, not just at the ``_validate_api_key`` level. A fresh request
+        for the same key afterward must then be rejected.
+        """
+        from litestar.connection import ASGIConnection
+        from litestar.exceptions import NotAuthorizedException
+
+        from litestar_api_auth.guards import get_api_key_info
+
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users", "write:users"]),
+        )
+
+        observed: list[APIKeyInfo] = []
+
+        async def _guard_then_handler(inner_scope: dict[str, Any], _receive: Any, _send: Any) -> None:
+            connection = ASGIConnection(inner_scope)  # type: ignore[arg-type]
+
+            # Guard-time read: the request is authenticated and in scope.
+            observed.append(get_api_key_info(connection))
+
+            # A concurrent request revokes this key and drops a scope while
+            # *this* request is still executing past the guard.
+            await backend.update(key_hash, scopes=["read:users"])
+            await backend.revoke(key_hash)
+
+            # Handler-time read, still within this same in-flight request.
+            observed.append(get_api_key_info(connection))
+
+        middleware = APIKeyMiddleware(app=_guard_then_handler, backend=backend)  # type: ignore[arg-type]
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        assert len(observed) == 2
+        for snapshot in observed:
+            assert snapshot.is_active is True
+            assert snapshot.scopes == ["read:users", "write:users"]
+
+        # A brand new request for the same (now revoked) key must be
+        # rejected by the middleware itself: state["api_key"] stays None, so
+        # the same get_api_key_info() the downstream app calls now raises.
+        second_scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+        with pytest.raises(NotAuthorizedException):
+            await middleware(second_scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+        assert second_scope["state"]["api_key"] is None

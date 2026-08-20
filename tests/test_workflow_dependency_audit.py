@@ -170,7 +170,12 @@ class TestDependencyAuditJob:
         assert export_match is not None, "ci.yml: could not find the 'uv export ... -o <file>' step"
         exported_file = export_match.group(1)
 
-        audit_index = job.index("pip-audit")
+        # Anchor on the actual `uses:` invocation, not a bare "pip-audit" substring --
+        # a preceding step (or comment) that mentions pip-audit while pinning its exact
+        # version would otherwise shift this window away from the action's own `with:` block.
+        audit_uses_match = re.search(r"^\s*(?:-\s+)?uses:\s*\S*pip-audit\S*", job, re.MULTILINE)
+        assert audit_uses_match is not None, "ci.yml: could not find a 'uses:' step referencing pip-audit"
+        audit_index = audit_uses_match.start()
         following = job[audit_index : audit_index + 400]
         assert exported_file in following, (
             f"ci.yml: the pip-audit step does not reference {exported_file!r}, the file the "

@@ -55,7 +55,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from litestar_api_auth import APIAuthConfig
 from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
-engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/myapp")
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@localhost/myapp",
+    hide_parameters=True,  # see "Sensitive Data in SQL Logs" below
+)
 
 config = APIAuthConfig(
     backend=SQLAlchemyBackend(
@@ -103,6 +106,41 @@ The remaining columns map directly to the fields on
 `DateTimeUTC` and `JsonB` are portable Advanced Alchemy column types that
 adapt automatically to each database dialect (e.g. native `jsonb` on PostgreSQL,
 `JSON` on MySQL/SQLite).
+
+### Sensitive Data in SQL Logs
+
+`key_hash` is bound as a SQL parameter on every `create()`, `get()`,
+`update()` (and therefore `revoke()`/`update_last_used()`), and `delete()`
+call this backend issues. SQLAlchemy engines default to
+`hide_parameters=False`, and this backend does not modify the logging
+configuration of the engine you supply -- so enabling `echo=True` on
+`create_async_engine()`, or raising the `sqlalchemy.engine.Engine` logger to
+`INFO`, writes the exact stored verifier to your logs on every key lookup,
+and on every `update_last_used()` call (when `track_usage` is enabled, the
+default).
+
+If your deployment treats key hashes as sensitive, construct the engine with
+`hide_parameters=True`:
+
+```python
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@localhost/myapp",
+    hide_parameters=True,
+)
+```
+
+and keep the effective `sqlalchemy.engine.Engine` logger at `WARNING` or
+higher -- i.e. never enable `INFO` or `DEBUG` -- in any environment whose
+logs are persisted or shipped to a log aggregator.
+
+`hide_parameters=True` only redacts *bound statement parameters* -- it does
+not touch *result rows*. `get()` and `get_by_id()` select the `key_hash`
+column back out of the table, so raising the engine to `echo="debug"`
+(SQLAlchemy's row-level echo mode, stronger than `echo=True`) logs every
+fetched row -- `key_hash` included -- regardless of `hide_parameters`. Treat
+`echo="debug"` the same as `echo=True`: never enable it, or the
+`sqlalchemy.engine.Engine` logger at `DEBUG`, in any environment whose logs
+are persisted or shipped to a log aggregator.
 
 ### Advanced Usage: Model → Repository → Service
 

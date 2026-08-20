@@ -49,11 +49,24 @@ class APIKeyBackend(Protocol):
         """
         ...
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last used timestamp for an API key.
+
+        Returning the freshly written record when the key still exists lets
+        ``APIKeyMiddleware`` detect a revoke() (or an expiry shortened by a
+        concurrent update()) that landed in the narrow window between its
+        earlier ``get()`` call and this one -- see the "Revocation timing"
+        section of ``APIKeyMiddleware``'s docstring. Returning ``None`` is
+        ambiguous by design: it covers both "nothing further to report" (a
+        backend that predates this return value) *and* "the key was deleted
+        concurrently" -- the middleware cannot tell those apart, so a
+        concurrent delete() in that same window is not caught this way.
 
         Args:
             key_hash: The hashed API key value.
+
+        Returns:
+            The updated APIKeyInfo if the backend can provide one, None otherwise.
         """
         ...
 
@@ -75,18 +88,37 @@ class APIKeyMiddleware(AbstractMiddleware):
     and authorization policies.
 
     Revocation timing:
-        Guards check the ``APIKeyInfo`` snapshot this middleware captured at
-        validation time, not the backend itself. ``is_expired`` is recomputed
-        from ``expires_at`` against the current time on every guard check, so
-        expiry is always evaluated "live". ``is_active``, however, is a value
-        copied from the backend's response to a single ``backend.get()``
-        call: if a key is revoked (or has a scope removed) after that call
-        but before the guard/handler for *that same request* finishes
-        running, the in-flight request completes using the pre-revocation
-        snapshot. This is standard request-scoped caching, not a reusable
-        bypass -- every request validated after the revocation lands is
-        rejected as usual, since the next ``backend.get()`` sees the updated
-        record.
+        Guards check the ``APIKeyInfo`` snapshot this middleware captured
+        from a single ``backend.get()`` call, not the backend itself.
+        ``is_active``, ``scopes``, and ``expires_at`` are all values copied
+        from that one call and are never re-fetched for the rest of the
+        request: only the *comparison* against ``expires_at`` is re-evaluated
+        live (against the current wall-clock time) on every guard check, not
+        ``expires_at`` itself. So if a key is revoked, has a scope removed, or
+        has its expiry shortened *after* this middleware's ``backend.get()``
+        call but before the guard/handler for *that same request* finishes
+        running, that one in-flight request is unaffected by the change --
+        it keeps evaluating against the pre-change snapshot for its entire
+        lifetime. This is standard request-scoped caching, not a reusable
+        bypass: every request validated *after* the backend change lands
+        sees it, since that request's own ``backend.get()`` call returns the
+        updated record.
+
+        The one exception is the narrower window between that ``backend.get()``
+        call and the ``update_last_used()`` call made moments later, still
+        within the same request: if a backend's ``update_last_used()`` returns
+        its freshly written record (the bundled memory/Redis/SQLAlchemy
+        backends all do, whenever the key still exists), this middleware
+        re-validates it and rejects the request if a revoke() or an expiry
+        shortened by a concurrent update() landed in that window, instead of
+        installing the now-stale ``backend.get()`` snapshot. A backend that
+        returns ``None`` from ``update_last_used()`` is unaffected either way
+        -- the request proceeds on the original snapshot exactly as before --
+        and that includes the case where the key was *deleted* concurrently
+        in that same window: a bundled backend's ``update_last_used()`` also
+        returns ``None`` then (it cannot distinguish "deleted" from "nothing
+        to report" without breaking backends that predate this return value),
+        so a concurrent delete() in this narrow window is not caught.
 
     Attributes:
         backend: The storage backend for API keys.
@@ -159,10 +191,13 @@ class APIKeyMiddleware(AbstractMiddleware):
         api_key = self._extract_api_key(scope)
 
         # If an API key is present, validate it and store in state. key_info
-        # is a snapshot as of this backend.get() call (see "Revocation
-        # timing" in the class docstring): a revoke()/scope change that lands
-        # after this call but before the guard/handler for this request
-        # finishes does not retroactively affect this in-flight request.
+        # starts as a snapshot as of this backend.get() call (see
+        # "Revocation timing" in the class docstring): once state["api_key"]
+        # below is populated from it, a revoke()/scope change that lands
+        # afterward does not retroactively affect this in-flight request's
+        # snapshot. A backend can still catch a concurrent revocation in the
+        # narrower window up to update_last_used() -- see the comment there --
+        # in which case key_info is replaced with that fresher record first.
         if api_key:
             try:
                 key_info = await self._validate_api_key(api_key)
@@ -172,9 +207,11 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # populated in the `else` clause below -- so a race-aware
                 # custom backend raising APIKeyNotFoundError/APIKeyExpiredError/
                 # APIKeyRevokedError/InvalidAPIKeyError here (e.g. detecting a
-                # concurrent revocation or deletion) is handled the same way a
-                # validation failure is, instead of leaving a just-invalidated
-                # key authenticated because state was already set beforehand.
+                # concurrent revocation or deletion), or _check_key_info_is_valid()
+                # raising one of those same errors against a fresher record the
+                # backend returns instead, is handled the same way a validation
+                # failure is -- instead of leaving a just-invalidated key
+                # authenticated because state was already set beforehand.
                 if self.update_last_used:
                     key_hash = self._hash_api_key(api_key)
                     with contextlib.suppress(RuntimeError):
@@ -183,7 +220,24 @@ class APIKeyMiddleware(AbstractMiddleware):
                         # WATCH/MULTI retries under heavy write contention on
                         # this key) must not turn an otherwise valid,
                         # already-authenticated request into a failure.
-                        await self.backend.update_last_used(key_hash)
+                        updated_info = await self.backend.update_last_used(key_hash)
+
+                        # A backend that returns its freshly written record
+                        # here (the bundled memory/Redis/SQLAlchemy backends
+                        # all do, when the key still exists) lets us catch a
+                        # revoke() or an expiry shortened by a concurrent
+                        # update() that committed in the narrow window between
+                        # backend.get() above and this call -- closing the
+                        # race for backends that support it instead of
+                        # installing the by-then-stale key_info snapshot. A
+                        # backend that returns None here -- either because it
+                        # predates this return value, or because (for the
+                        # bundled backends) the key was deleted concurrently,
+                        # which is indistinguishable from the former -- leaves
+                        # key_info, and thus the request, exactly as before.
+                        if updated_info is not None:
+                            self._check_key_info_is_valid(updated_info)
+                            key_info = updated_info
             except (
                 APIKeyNotFoundError,
                 APIKeyExpiredError,
@@ -202,7 +256,7 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # monitoring tool that captures frame locals on unhandled
                 # exceptions (e.g. Sentry's include_local_variables) cannot
                 # recover them from this frame's traceback entry.
-                api_key = key_hash = key_info = None
+                api_key = key_hash = key_info = updated_info = None
                 raise
             else:
                 # Store the APIKeyInfo in request state for guards to access.
@@ -211,7 +265,22 @@ class APIKeyMiddleware(AbstractMiddleware):
                 # this object directly (see the Warning in
                 # guards.get_api_key_info's docstring) would otherwise
                 # serialize the hash into the HTTP response.
-                scope["state"]["api_key"] = msgspec.structs.replace(key_info, key_hash="")
+                try:
+                    redacted_key_info = msgspec.structs.replace(key_info, key_hash="")
+                except BaseException:
+                    # An exception raised here (e.g. a custom backend's
+                    # key_info duck-typing its way past
+                    # _check_key_info_is_valid without actually being a
+                    # msgspec.Struct, so replace() raises TypeError) is
+                    # *not* caught by the `except BaseException` above --
+                    # exceptions raised in an `else` clause are not handled
+                    # by the `except` clauses of that same try statement --
+                    # so this needs its own scrub-and-reraise before it
+                    # propagates out of this frame while api_key is still
+                    # the raw bearer key.
+                    api_key = key_hash = key_info = updated_info = None
+                    raise
+                scope["state"]["api_key"] = redacted_key_info
 
         # None of api_key/key_hash/key_info are needed past this point (the
         # key has already been hashed and, if valid, handed off via
@@ -224,7 +293,7 @@ class APIKeyMiddleware(AbstractMiddleware):
         # the original headers to remain available to downstream
         # middleware/handlers, so a frame-locals capture of the *downstream*
         # app's own frame can still observe the raw key via scope.
-        api_key = key_hash = key_info = None
+        api_key = key_hash = key_info = updated_info = None
 
         # Continue processing the request
         await self.app(scope, receive, send)
@@ -268,8 +337,20 @@ class APIKeyMiddleware(AbstractMiddleware):
         # (backend.get() raising unexpectedly, or key_info.is_active/
         # is_expired raising) recover the plaintext bearer key from this
         # frame's traceback entry. __call__'s own BaseException handler only
-        # scrubs its *own* frame, not this one.
-        key_hash = self._hash_api_key(api_key)
+        # scrubs its *own* frame, not this one. _hash_api_key() itself is
+        # wrapped too: if it raises before the del below ever runs, api_key
+        # would otherwise still be bound in this frame's locals.
+        try:
+            key_hash = self._hash_api_key(api_key)
+        except BaseException:
+            # api_key is declared str, not str | None, so it is scrubbed to
+            # "" here rather than reassigned to None (which `del` below
+            # would otherwise handle) -- and not `del`-ed either, since a
+            # `del` on this branch alone would make ruff's flow analysis
+            # treat the unconditional `del api_key` below as a possible
+            # double-delete.
+            api_key = ""
+            raise
         del api_key
 
         # Look up the key in the backend
@@ -287,6 +368,39 @@ class APIKeyMiddleware(AbstractMiddleware):
         if key_info is None:
             raise APIKeyNotFoundError()
 
+        try:
+            self._check_key_info_is_valid(key_info)
+        except BaseException:
+            # Mirrors the scrub-on-BaseException pattern above for
+            # backend.get(): an unexpected error here (e.g. a corrupted
+            # expires_at making key_info.is_expired raise) must not leave
+            # key_hash/key_info bound in this frame while it propagates.
+            # api_key itself was already dropped above, but key_hash and
+            # key_info are still sensitive verifier state per this class's
+            # own redaction convention (see the key_hash="" redaction in
+            # __call__'s else clause).
+            key_hash = key_info = None
+            raise
+
+        return key_info
+
+    def _check_key_info_is_valid(self, key_info: APIKeyInfo) -> None:
+        """Validate an already-fetched ``APIKeyInfo`` record.
+
+        Shared by ``_validate_api_key`` (against the initial ``backend.get()``
+        snapshot) and ``__call__`` (against a fresher record a backend's
+        ``update_last_used()`` may return -- see the "Revocation timing"
+        section of this class's docstring), so both call sites reject a
+        revoked, expired, or malformed record the same way.
+
+        Args:
+            key_info: The record to validate.
+
+        Raises:
+            InvalidAPIKeyError: If the record's field types cannot be trusted.
+            APIKeyRevokedError: If the key has been revoked.
+            APIKeyExpiredError: If the key has expired.
+        """
         # A backend record whose is_active/scopes fields don't actually match
         # the types APIKeyInfo declares must not be trusted: msgspec.Struct
         # does not enforce field types on direct construction, so a
@@ -309,8 +423,6 @@ class APIKeyMiddleware(AbstractMiddleware):
                 key_id=key_info.key_id,
                 expired_at=key_info.expires_at,
             )
-
-        return key_info
 
     def _hash_api_key(self, api_key: str) -> str:
         """Hash an API key for backend lookup.

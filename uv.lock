@@ -568,12 +568,17 @@ name = "litestar-api-auth"
 version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
+    { name = "idna" },
     { name = "litestar" },
+    { name = "multipart" },
+    { name = "pygments" },
 ]
 
 [package.optional-dependencies]
 all = [
     { name = "advanced-alchemy" },
+    { name = "mako" },
     { name = "redis" },
     { name = "sqlalchemy" },
 ]
@@ -582,6 +587,7 @@ redis = [
 ]
 sqlalchemy = [
     { name = "advanced-alchemy" },
+    { name = "mako" },
     { name = "sqlalchemy" },
 ]
 
@@ -654,8 +660,13 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "advanced-alchemy", marker = "extra == 'sqlalchemy'", specifier = ">=0.20.0" },
+    { name = "click", specifier = ">=8.3.3" },
+    { name = "idna", specifier = ">=3.15" },
     { name = "litestar", specifier = ">=2.22.0" },
     { name = "litestar-api-auth", extras = ["sqlalchemy", "redis"], marker = "extra == 'all'" },
+    { name = "mako", marker = "extra == 'sqlalchemy'", specifier = ">=1.3.12" },
+    { name = "multipart", specifier = ">=1.3.1" },
+    { name = "pygments", specifier = ">=2.20.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
 ]

@@ -64,11 +64,12 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
 
         This re-check is still against the request-scoped snapshot
         ``APIKeyMiddleware`` stored, not a fresh backend lookup: ``is_active``
-        reflects the backend record as of that middleware's ``backend.get()``
-        call for *this* request, not any revocation that lands afterward.
-        See "Revocation timing" on :class:`APIKeyMiddleware
-        <litestar_api_auth.middleware.APIKeyMiddleware>` for the exact
-        semantics.
+        and ``scopes`` (checked by :func:`require_scope`/:func:`require_scopes`)
+        both reflect the backend record as of that middleware's single
+        ``backend.get()`` call for *this* request, not any revocation or
+        scope change that lands afterward. See "Revocation timing" on
+        :class:`APIKeyMiddleware <litestar_api_auth.middleware.APIKeyMiddleware>`
+        for the exact semantics.
 
     Example:
         >>> from litestar import get, Request

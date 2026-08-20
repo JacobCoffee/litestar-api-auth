@@ -233,11 +233,24 @@ _TRANSITIVE_MIN_VERSIONS = {
 }
 """Transitive dependencies with a known-vulnerable version below the given floor.
 
-Each of these is not a direct ``[project.dependencies]``/dependency-group
-entry, so the only floor available is a ``[tool.uv] constraint-dependencies``
-pin (mirroring the ``multipart`` pattern above). Before this fix, uv.lock
-pinned versions below every one of these floors and no constraint existed;
-these assertions would have failed against that state.
+None of these are direct dependency-group entries, so each also carries a
+``[tool.uv] constraint-dependencies`` pin (mirroring the ``multipart``
+pattern above) to keep a relock in this repo's own lock/dev environment from
+reintroducing the vulnerable version. Before this fix, uv.lock pinned
+versions below every one of these floors and no constraint existed; these
+assertions would have failed against that state.
+
+``starlette`` and ``requests`` are transitive only through the docs
+dependency group, so a ``[tool.uv]`` constraint is the only floor that makes
+sense for them -- they never ship to a consumer installing this package.
+``click``, ``idna``, ``pygments``, and ``mako`` (via the ``sqlalchemy``
+extra), by contrast, are transitive *runtime* dependencies that reach every
+consumer of the published package; for those,
+``test_pyproject_dependencies_floor_excludes_vulnerable_transitive_version``
+and ``test_pyproject_sqlalchemy_extra_floor_excludes_vulnerable_mako_version``
+below additionally require a floor in published package metadata
+(``[project.dependencies]`` or the relevant extra), since a
+constraint-dependencies-only floor is invisible to a downstream resolver.
 """
 
 
@@ -293,11 +306,15 @@ def test_pyproject_constrains_transitive_dependency_above_vulnerable_version(
 ) -> None:
     """``pyproject.toml`` must pin a ``[tool.uv]`` constraint excluding each vulnerable range.
 
-    None of these packages are direct dependencies of this project, so there
-    is no ``[project.dependencies]`` floor to raise. Without an explicit
-    ``[tool.uv] constraint-dependencies`` floor, a future relock could
-    silently reintroduce the vulnerable release. Before this fix, no such
-    constraint existed for any of them and this assertion would have failed.
+    Without an explicit ``[tool.uv] constraint-dependencies`` floor, a future
+    relock could silently reintroduce the vulnerable release in this repo's
+    own lock/dev environment. Before this fix, no such constraint existed for
+    any of them and this assertion would have failed. Note that a
+    constraint-dependencies entry alone does not protect a downstream
+    consumer of the published package -- see
+    ``test_pyproject_dependencies_floor_excludes_vulnerable_transitive_version``
+    and ``test_pyproject_sqlalchemy_extra_floor_excludes_vulnerable_mako_version``
+    for the floors that do.
     """
     min_version, advisory, _source = spec
     pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
@@ -392,13 +409,15 @@ def test_pyproject_constrains_multipart_above_vulnerable_version() -> None:
     """``pyproject.toml`` must pin a ``[tool.uv]`` constraint excluding the
     vulnerable multipart range.
 
-    multipart is not a direct dependency of this project, so there is no
-    ``[project.dependencies]`` floor to raise. Since litestar's own
-    dependency bound (``multipart>=1.2.0``) does not exclude the vulnerable
-    1.3.0 release, this project must pin an explicit ``[tool.uv]
-    constraint-dependencies`` floor instead, or a future relock could
-    silently reintroduce PYSEC-2026-2670. Before this fix, no such
-    constraint existed and this assertion would have failed.
+    Since litestar's own dependency bound (``multipart>=1.2.0``) does not
+    exclude the vulnerable 1.3.0 release, this project must also pin an
+    explicit ``[tool.uv] constraint-dependencies`` floor, or a future relock
+    could silently reintroduce PYSEC-2026-2670 in this repo's own lock/dev
+    environment. Before this fix, no such constraint existed and this
+    assertion would have failed. See
+    ``test_pyproject_dependencies_floor_excludes_vulnerable_transitive_version``
+    for the floor that also protects a downstream consumer of the published
+    package.
     """
     pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
     constraints = pyproject_data.get("tool", {}).get("uv", {}).get("constraint-dependencies", [])
@@ -421,3 +440,105 @@ def test_pyproject_constrains_multipart_above_vulnerable_version() -> None:
             f"pyproject.toml's multipart constraint is {multipart_req!r}, which still permits "
             "versions vulnerable to PYSEC-2026-2670"
         )
+
+
+_PUBLISHED_RUNTIME_TRANSITIVE_MIN_VERSIONS = {
+    "multipart": (_MULTIPART_MIN_VERSION, "PYSEC-2026-2670"),
+    "click": (Version("8.3.3"), "PYSEC-2026-2132"),
+    "idna": (Version("3.15"), "PYSEC-2026-215"),
+    "pygments": (Version("2.20.0"), "PYSEC-2026-2987"),
+}
+"""Transitive runtime dependencies (via litestar) that must be floored in
+``[project.dependencies]`` itself, not only in ``[tool.uv]
+constraint-dependencies``.
+
+``uv.lock``'s ``requires-dist`` for this package only ever reflects
+``[project.dependencies]``/optional-dependencies entries (litestar, redis,
+sqlalchemy, advanced-alchemy) -- a ``[tool.uv] constraint-dependencies``
+pin only affects this repo's own lock/dev environment and is never
+published. Without a matching ``[project.dependencies]`` floor, a
+downstream consumer whose own resolver or constraints file pins e.g.
+``click<8.3.3`` would still resolve a vulnerable click even with
+litestar-api-auth installed, contrary to what the constraint-dependencies
+comments claimed. Before this fix, none of these appeared in
+``[project.dependencies]`` and this assertion would have failed for each.
+"""
+
+
+@pytest.mark.parametrize(("package_name", "spec"), sorted(_PUBLISHED_RUNTIME_TRANSITIVE_MIN_VERSIONS.items()))
+def test_pyproject_dependencies_floor_excludes_vulnerable_transitive_version(
+    package_name: str, spec: tuple[Version, str]
+) -> None:
+    """``[project.dependencies]`` must itself floor each transitive runtime dependency.
+
+    This is the floor that reaches a downstream consumer's own dependency
+    resolution (via ``requires-dist`` in the published package metadata),
+    as opposed to the ``[tool.uv] constraint-dependencies`` entry, which
+    only constrains this repo's own lock file. Before this fix,
+    ``[project.dependencies]`` contained only ``litestar>=2.22.0`` and this
+    assertion would have failed for every package below.
+    """
+    min_version, advisory = spec
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    requirements = [Requirement(dep) for dep in pyproject_data["project"]["dependencies"]]
+    req = next((r for r in requirements if r.name == package_name), None)
+
+    assert req is not None, (
+        f"{package_name} not found in [project.dependencies]; a [tool.uv] "
+        f"constraint-dependencies floor alone does not protect a downstream "
+        f"consumer from {advisory}, since it is never published in this "
+        f"package's requires-dist metadata"
+    )
+    assert req.marker is None, (
+        f"{package_name} requirement {req!r} is gated by an environment marker; a marked "
+        f"requirement leaves the unmatched environments unfloored, which could reintroduce "
+        f"{advisory} for them"
+    )
+
+    lower_bounds = [spec_item.version for spec_item in req.specifier if spec_item.operator in (">=", ">", "==", "~=")]
+    assert lower_bounds, f"{package_name} requirement {req!r} has no lower-bound specifier"
+    assert all(
+        Version(bound) >= min_version for bound in lower_bounds
+    ), f"pyproject.toml's {package_name} requirement is {req!r}, which still permits versions vulnerable to {advisory}"
+
+
+_MAKO_MIN_VERSION = Version("1.3.12")
+"""Versions below this are vulnerable to PYSEC-2026-2617 (also PYSEC-2026-88), fixed in 1.3.12."""
+
+
+def test_pyproject_sqlalchemy_extra_floor_excludes_vulnerable_mako_version() -> None:
+    """The ``sqlalchemy`` optional-dependencies extra must itself floor mako.
+
+    mako reaches a consumer only through ``litestar-api-auth[sqlalchemy]``
+    (via advanced-alchemy's alembic dependency), so unlike the base runtime
+    transitive dependencies above, its published floor belongs in the
+    ``sqlalchemy`` extra rather than in ``[project.dependencies]``. A
+    ``[tool.uv] constraint-dependencies`` entry alone is not published in
+    this package's metadata and so does not protect a consumer installing
+    that extra. Before this fix, the ``sqlalchemy`` extra contained only
+    ``sqlalchemy>=2.0`` and ``advanced-alchemy>=0.20.0``, and this assertion
+    would have failed.
+    """
+    pyproject_data = tomllib.loads(_PYPROJECT_FILE.read_text())
+    sqlalchemy_extra = pyproject_data["project"]["optional-dependencies"]["sqlalchemy"]
+    requirements = [Requirement(dep) for dep in sqlalchemy_extra]
+    mako_req = next((r for r in requirements if r.name == "mako"), None)
+
+    assert mako_req is not None, (
+        "mako not found in the `sqlalchemy` optional-dependencies extra; a [tool.uv] "
+        "constraint-dependencies floor alone does not protect a consumer installing "
+        "litestar-api-auth[sqlalchemy] from PYSEC-2026-2617/PYSEC-2026-88, since it is "
+        "never published in this package's requires-dist metadata"
+    )
+    assert mako_req.marker is None, (
+        f"mako requirement {mako_req!r} in the sqlalchemy extra is gated by an environment "
+        f"marker; a marked requirement leaves the unmatched environments unfloored even when "
+        f"installing the extra, which could reintroduce PYSEC-2026-2617/PYSEC-2026-88 for them"
+    )
+
+    lower_bounds = [spec.version for spec in mako_req.specifier if spec.operator in (">=", ">", "==", "~=")]
+    assert lower_bounds, f"mako requirement {mako_req!r} has no lower-bound specifier"
+    assert all(Version(bound) >= _MAKO_MIN_VERSION for bound in lower_bounds), (
+        f"pyproject.toml's mako requirement in the sqlalchemy extra is {mako_req!r}, which still "
+        "permits versions vulnerable to PYSEC-2026-2617/PYSEC-2026-88"
+    )

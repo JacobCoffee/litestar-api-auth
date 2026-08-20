@@ -225,6 +225,17 @@ class RedisBackend:
         # both key_hash and key_id indexes.
         from redis.exceptions import ResponseError, WatchError
 
+        # `error_to_raise` is raised *after* the loop below, rather than from
+        # inside the `except ResponseError` clause via `raise ... from None`:
+        # `from None` only sets `__suppress_context__` (which standard
+        # traceback formatting and Sentry's chain walker both honor), but
+        # leaves the caught ResponseError -- and, through it, key_hash
+        # embedded in the annotated failed command -- reachable via
+        # `__context__` for anything that walks the raw exception graph.
+        # Raising once the except block (and the loop) has exited leaves
+        # `__context__` unset entirely. Mirrors the sqlalchemy backend's
+        # identical pattern; see its create()/get() comments.
+        error_to_raise: RuntimeError | None = None
         max_retries = 5
         for _ in range(max_retries):
             pipeline = self._client.pipeline(transaction=True)
@@ -258,18 +269,19 @@ class RedisBackend:
                 # redis-py annotates a pipeline ResponseError with the full
                 # failed command (see Pipeline.annotate_exception), which for
                 # the SET/SADD calls above embeds redis_key/key_hash -- the
-                # exact stored verifier -- directly in exception.args. Raise a
-                # sanitized RuntimeError instead of re-raising it, with `from
-                # None` so the annotated original (and the key_hash inside it)
-                # doesn't surface via __context__ in debug-mode responses,
-                # logs, or error reporters.
-                msg = "Failed to create API key due to a Redis error"
-                raise RuntimeError(msg) from None
+                # exact stored verifier -- directly in exception.args. Store
+                # the sanitized RuntimeError instead of raising it here; see
+                # the comment above `error_to_raise` for why.
+                error_to_raise = RuntimeError("Failed to create API key due to a Redis error")
+                break
             finally:
                 await pipeline.reset()
         else:
             msg = "Failed to create API key due to concurrent writes"
             raise RuntimeError(msg)
+
+        if error_to_raise is not None:
+            raise error_to_raise
 
         return info
 
@@ -369,6 +381,12 @@ class RedisBackend:
         # by a stale read-modify-write.
         from redis.exceptions import ResponseError, WatchError
 
+        # `error_to_raise` is raised *after* the loop below, rather than from
+        # inside the `except ResponseError` clause via `raise ... from None`:
+        # see create()'s identical `error_to_raise` comment for why `from
+        # None` alone (which only sets `__suppress_context__`) is not enough
+        # to keep key_hash out of `__context__`.
+        error_to_raise: RuntimeError | None = None
         max_retries = 5
         for _ in range(max_retries):
             pipeline = self._client.pipeline(transaction=True)
@@ -449,16 +467,17 @@ class RedisBackend:
                 # in practice: KEEPTTL requires Redis 6.0+, so every update()
                 # (and update_last_used(), invoked on every authenticated
                 # request) raises ResponseError here against an older server.
-                # Raise a sanitized RuntimeError instead of re-raising it,
-                # with `from None` so the annotated original (and the
-                # key_hash inside it) doesn't surface via __context__ in
-                # debug-mode responses, logs, or error reporters. RuntimeError
-                # also matches what middleware.py's update_last_used() call
+                # Store the sanitized RuntimeError instead of raising it here
+                # (see the comment above `error_to_raise`); RuntimeError also
+                # matches what middleware.py's update_last_used() call
                 # already treats as a best-effort failure to suppress.
-                msg = "Failed to update API key due to a Redis error"
-                raise RuntimeError(msg) from None
+                error_to_raise = RuntimeError("Failed to update API key due to a Redis error")
+                break
             finally:
                 await pipeline.reset()
+
+        if error_to_raise is not None:
+            raise error_to_raise
 
         msg = "Failed to update API key due to concurrent writes"
         raise RuntimeError(msg)
@@ -496,6 +515,12 @@ class RedisBackend:
 
         from redis.exceptions import ResponseError, WatchError
 
+        # `error_to_raise` is raised *after* the loop below, rather than from
+        # inside the `except ResponseError` clause via `raise ... from None`:
+        # see create()'s identical `error_to_raise` comment for why `from
+        # None` alone (which only sets `__suppress_context__`) is not enough
+        # to keep key_hash out of `__context__`.
+        error_to_raise: RuntimeError | None = None
         max_retries = 5
         for _ in range(max_retries):
             pipeline = self._client.pipeline(transaction=True)
@@ -523,15 +548,16 @@ class RedisBackend:
                 # failed command (see Pipeline.annotate_exception), which for
                 # the DELETE/SREM calls above embeds redis_key/id_key/key_hash
                 # -- the exact stored verifier -- directly in exception.args.
-                # Raise a sanitized RuntimeError instead of re-raising it,
-                # with `from None` so the annotated original (and the
-                # key_hash inside it) doesn't surface via __context__ in
-                # debug-mode responses, logs, or error reporters, mirroring
+                # Store the sanitized RuntimeError instead of raising it here
+                # (see the comment above `error_to_raise`), mirroring
                 # create()'s and update()'s identical handling.
-                msg = "Failed to delete API key due to a Redis error"
-                raise RuntimeError(msg) from None
+                error_to_raise = RuntimeError("Failed to delete API key due to a Redis error")
+                break
             finally:
                 await pipeline.reset()
+
+        if error_to_raise is not None:
+            raise error_to_raise
 
         msg = "Failed to delete API key due to concurrent writes"
         raise RuntimeError(msg)
@@ -649,13 +675,23 @@ class RedisBackend:
         result = await self.update(key_hash, is_active=False)
         return result is not None
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
+
+        Returns the freshly updated record when the key still exists, so
+        callers can detect a concurrent revoke() (or an expiry shortened by
+        a concurrent update()) that landed between their earlier get() and
+        this call -- see ``APIKeyBackend.update_last_used``. A ``None``
+        return is ambiguous: it also covers the key having been deleted
+        concurrently, which is therefore not distinguishable this way.
 
         Args:
             key_hash: SHA-256 hash of the API key.
+
+        Returns:
+            The updated APIKeyInfo if found, None otherwise.
         """
-        await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
+        return await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
 
     async def close(self) -> None:
         """Close the backend and release Redis connections.

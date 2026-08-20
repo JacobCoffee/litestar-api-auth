@@ -176,8 +176,13 @@ from litestar import Litestar
 from litestar_api_auth import APIAuthPlugin, APIAuthConfig
 from litestar_api_auth.backends.sqlalchemy import SQLAlchemyBackend, SQLAlchemyConfig
 
-# Create engine (use your actual database URL)
-engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/myapp")
+# Create engine (use your actual database URL). hide_parameters=True keeps
+# the stored key hash out of SQL logs if you ever enable echo/INFO-level
+# engine logging -- see "Sensitive Data in SQL Logs" in the backends guide.
+engine = create_async_engine(
+    "postgresql+asyncpg://user:pass@localhost/myapp",
+    hide_parameters=True,
+)
 
 # Configure the plugin
 app = Litestar(

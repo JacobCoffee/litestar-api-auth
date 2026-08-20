@@ -219,13 +219,27 @@ class APIKeyBackend(Protocol):
         """
         ...
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
 
         This is called automatically when a key is used for authentication.
 
+        Returns the freshly written record when the key still exists, so a
+        caller (see ``APIKeyMiddleware.__call__``) can detect a revoke() or
+        an expiry shortened by an in-place update() that landed in the
+        narrow window between an earlier ``get()`` and this call, closing
+        that race for backends that support it. Returning ``None`` is
+        ambiguous by design -- it covers both "nothing further to report"
+        (e.g. a backend predating this return value) *and* "the record was
+        deleted concurrently" -- so callers must not treat a ``None`` return
+        as proof of deletion; a concurrent delete() in that same window is
+        not distinguishable this way and remains uncaught.
+
         Args:
             key_hash: SHA-256 hash of the API key
+
+        Returns:
+            The updated APIKeyInfo if the backend can provide one, None otherwise.
         """
         ...
 

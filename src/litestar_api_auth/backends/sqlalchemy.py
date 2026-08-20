@@ -200,6 +200,33 @@ class SQLAlchemyBackend:
     Note:
         This backend requires the ``sqlalchemy`` optional dependency.
         Install with: ``pip install litestar-api-auth[sqlalchemy]``
+
+    Warning:
+        ``key_hash`` is bound as a SQL parameter on every ``create()``,
+        ``get()``, ``update()`` (and therefore ``revoke()`` /
+        ``update_last_used()``), and ``delete()`` call. SQLAlchemy engines
+        default to ``hide_parameters=False``, and this backend does not
+        modify the logging configuration of the engine you pass in -- so a
+        deployment that enables ``echo=True`` on ``create_async_engine()``,
+        or raises the ``sqlalchemy.engine.Engine`` logger to ``INFO`` for
+        debugging, writes the exact stored verifier for every key lookup,
+        and for every ``update_last_used()`` call (when ``track_usage`` is
+        enabled, the default), to its logs. Deployments that treat
+        ``key_hash`` as sensitive must construct their own engine with
+        ``hide_parameters=True`` and keep the effective
+        ``sqlalchemy.engine.Engine`` logger at ``WARNING`` or higher (i.e.
+        never enable ``INFO`` or ``DEBUG``) in any environment whose logs
+        are persisted or shipped to a log aggregator.
+
+        ``hide_parameters=True`` only redacts *bound statement parameters* --
+        it does not touch *result rows*. ``get()`` and ``get_by_id()`` select
+        the ``key_hash`` column back out of the table, so raising the engine
+        to ``echo="debug"`` (SQLAlchemy's row-level echo mode, stronger than
+        ``echo=True``) logs every fetched row -- ``key_hash`` included --
+        regardless of ``hide_parameters``. Treat ``echo="debug"`` the same as
+        ``echo=True``: never enable it, or the ``sqlalchemy.engine.Engine``
+        logger at ``DEBUG``, in any environment whose logs are persisted or
+        shipped to a log aggregator.
     """
 
     def __init__(self, config: SQLAlchemyConfig | None = None) -> None:
@@ -431,6 +458,7 @@ class SQLAlchemyBackend:
         if self._sessionmaker is None:
             return None
 
+        from sqlalchemy import bindparam, case, or_
         from sqlalchemy import update as sa_update
         from sqlalchemy.exc import StatementError
 
@@ -446,6 +474,31 @@ class SQLAlchemyBackend:
         # which row gets written below.
         update_data.pop("id", None)
 
+        # last_used_at must never move backward. update_last_used() captures
+        # datetime.now() before this UPDATE commits, so a slow request A can
+        # race a faster, later-timestamped request B: if B's UPDATE commits
+        # first, A's delayed UPDATE must not clobber B's newer value with its
+        # own stale one -- see RedisBackend.update() for the same race. The
+        # guard is expressed as a CASE inside the UPDATE's SET clause (rather
+        # than a read-compare-write) so the write stays a single
+        # UPDATE ... WHERE key_hash = :key_hash statement -- a read-then-write
+        # split would reintroduce the ABA race described below.
+        if "last_used_at" in update_data and update_data["last_used_at"] is not None:
+            # Bind `incoming` explicitly as the column's own DateTimeUTC type.
+            # Passing the bare Python datetime as the THEN value instead binds
+            # it as a plain, untyped literal -- silently skipping DateTimeUTC's
+            # UTC-normalizing bind processor for that one bind -- and the CASE
+            # expression's own result type then gets inferred from that
+            # untyped literal rather than from the compared column. A
+            # non-UTC-offset (but still tz-aware) timestamp would then be
+            # stored under its raw, un-normalized wall-clock value, defeating
+            # the very guard being added here.
+            incoming = bindparam("last_used_at_guard", update_data["last_used_at"], type_=self._model.last_used_at.type)
+            update_data["last_used_at"] = case(
+                (or_(self._model.last_used_at.is_(None), self._model.last_used_at < incoming), incoming),
+                else_=self._model.last_used_at,
+            )
+
         if not update_data:
             return await self.get(key_hash)
 
@@ -460,33 +513,52 @@ class SQLAlchemyBackend:
             # `RETURNING` is deliberately not used here: MySQL supports it for
             # neither UPDATE nor DELETE, and this backend targets PostgreSQL,
             # MySQL, and SQLite alike. The row is re-read by that same key_hash
-            # (never by id) inside the same transaction instead, so this second
-            # round trip can only ever resolve to the row the UPDATE above just
-            # wrote, never to an unrelated row.
+            # (never by id) inside the same transaction instead -- but only once
+            # `rowcount` confirms the UPDATE actually matched a row. Skipping that
+            # check let a zero-match UPDATE (no row with this key_hash) fall
+            # through to the re-read anyway: under READ COMMITTED, a concurrent
+            # create() committing a row with this exact key_hash between the
+            # UPDATE and the SELECT would make the SELECT observe that unrelated,
+            # never-updated row as if it were this call's result -- e.g. letting
+            # revoke() report a key as deactivated when the UPDATE never touched
+            # it and it is still active.
             # error_to_raise is raised after this try/except/else -- see the
             # comment in create() on why: `raise ... from None` inside the
             # `except` clause would only suppress the chain from standard
             # traceback formatting, not clear `__context__` itself.
             error_to_raise: RuntimeError | None = None
             try:
-                await session.execute(
+                result = await session.execute(
                     sa_update(self._model).where(self._model.key_hash == key_hash).values(**update_data)
                 )
+                if result.rowcount == 0:
+                    await session.rollback()
+                    return None
                 model = await session.scalar(select(self._model).where(self._model.key_hash == key_hash))
-            except StatementError:
-                # Both statements above bind key_hash as a SQL parameter.
-                # SQLAlchemy engines default to hide_parameters=False, and
-                # the engine is user-supplied so this library never sets
-                # it, so an unhandled StatementError/OperationalError here
-                # (e.g. a dropped connection or lock timeout) would put the
-                # exact stored verifier into a 500 response, logs, or an
-                # error reporter's captured traceback.
-                error_to_raise = RuntimeError("Failed to update API key due to a database error")
-            else:
                 if model is None:
                     await session.rollback()
                     return None
+                # commit() is inside this try, not in an `else` after it, so a
+                # commit-time failure (a dropped connection, lock timeout, or a
+                # deferred constraint firing at COMMIT) is caught by the same
+                # sanitizer below instead of escaping as a raw SQLAlchemy
+                # exception -- matching delete(), which commits inside its try
+                # for the same reason.
                 await session.commit()
+            except StatementError:
+                # The UPDATE and SELECT above bind key_hash as a SQL parameter.
+                # SQLAlchemy engines default to hide_parameters=False, and the
+                # engine is user-supplied so this library never sets it, so an
+                # unhandled StatementError/OperationalError here (e.g. a dropped
+                # connection or lock timeout) would put the exact stored
+                # verifier into a 500 response, logs, or an error reporter's
+                # captured traceback. commit() itself carries no bound
+                # parameters, but it must raise through this same sanitizer too
+                # (as delete()'s commit does) so every DB failure in this method
+                # -- not just the ones that happen to bind key_hash -- follows
+                # the same RuntimeError contract.
+                error_to_raise = RuntimeError("Failed to update API key due to a database error")
+            else:
                 return _model_to_info(model)
 
             raise error_to_raise
@@ -589,13 +661,23 @@ class SQLAlchemyBackend:
         result = await self.update(key_hash, is_active=False)
         return result is not None
 
-    async def update_last_used(self, key_hash: str) -> None:
+    async def update_last_used(self, key_hash: str) -> APIKeyInfo | None:
         """Update the last_used_at timestamp for a key.
+
+        Returns the freshly updated record when the key still exists, so
+        callers can detect a concurrent revoke() (or an expiry shortened by
+        a concurrent update()) that landed between their earlier get() and
+        this call -- see ``APIKeyBackend.update_last_used``. A ``None``
+        return is ambiguous: it also covers the key having been deleted
+        concurrently, which is therefore not distinguishable this way.
 
         Args:
             key_hash: SHA-256 hash of the API key.
+
+        Returns:
+            The updated APIKeyInfo if found, None otherwise.
         """
-        await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
+        return await self.update(key_hash, last_used_at=datetime.now(timezone.utc))
 
     async def close(self) -> None:
         """Close the backend and release database connections.

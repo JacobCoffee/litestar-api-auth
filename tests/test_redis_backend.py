@@ -144,11 +144,15 @@ class TestRedisBackendCreate:
             await redis_backend.create(hashed_key, info)
 
         assert hashed_key not in str(exc_info.value)
-        # `from None` suppresses the original ResponseError from traceback
-        # rendering (matching the SQLAlchemy backend's identical convention)
-        # even though CPython still tracks it on __context__ internally.
+        # The sanitized RuntimeError must be raised only after the
+        # except/finally handling the ResponseError has fully exited, so
+        # __context__ is never bound to the annotated original (which embeds
+        # key_hash). `raise ... from None` would only set
+        # __suppress_context__ while leaving __context__ walkable by anything
+        # that inspects the raw exception graph directly (e.g. error
+        # reporters) -- mirrors the sqlalchemy backend's identical assertions.
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
 
     async def test_create_duplicate_id(self, redis_backend: RedisBackend) -> None:
         """Test that creating a key with duplicate ID raises error."""
@@ -531,11 +535,12 @@ class TestRedisBackendUpdate:
 
         assert hashed_key not in str(exc_info.value)
         assert str(exc_info.value) == "Failed to update API key due to a Redis error"
-        # `from None` suppresses the original ResponseError from traceback
-        # rendering (matching create()'s identical convention) even though
-        # CPython still tracks it on __context__ internally.
+        # See test_create_pipeline_response_error_does_not_leak_hash: the
+        # sanitized RuntimeError must be raised only after the except/finally
+        # handling the ResponseError has fully exited, so __context__ is
+        # never bound to the annotated original (which embeds key_hash).
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
 
 
 class TestRedisBackendDelete:
@@ -769,8 +774,12 @@ class TestRedisBackendDelete:
 
         assert hashed_key not in str(exc_info.value)
         assert str(exc_info.value) == "Failed to delete API key due to a Redis error"
+        # See test_create_pipeline_response_error_does_not_leak_hash: the
+        # sanitized RuntimeError must be raised only after the except/finally
+        # handling the ResponseError has fully exited, so __context__ is
+        # never bound to the annotated original (which embeds key_hash).
         assert exc_info.value.__cause__ is None
-        assert exc_info.value.__suppress_context__ is True
+        assert exc_info.value.__context__ is None
 
 
 class TestRedisBackendList:

@@ -13,17 +13,41 @@ jobs:
   # so uv uses its own bundled copy of the backend instead of fetching the
   # `uv_build` package from PyPI at build time -- keep these two versions in
   # lockstep so that stays true.
-  # Restrict manual runs to tag refs: a bare `workflow_dispatch` trigger lets
-  # any collaborator with write access dispatch this workflow against an
-  # arbitrary branch or commit, publishing it to PyPI outside the normal
-  # release flow. Tags require a maintainer to push/create them (and should
-  # carry a tag protection ruleset), so gating on `ref_type == 'tag'` closes
-  # that arbitrary-ref gap; `release` events always fire with a tag ref too,
-  # so the normal release flow is unaffected.
+  # Restrict manual runs to tag refs dispatched by the repo owner: a bare
+  # `workflow_dispatch` trigger lets any collaborator with write access
+  # dispatch this workflow against an arbitrary branch or commit, publishing
+  # it to PyPI outside the normal release flow. Gating on `ref_type == 'tag'`
+  # alone isn't sufficient on its own: any write collaborator can create a
+  # tag pointing at any commit just as easily, and that gate's safety was
+  # assumed to rest on a tag protection ruleset and `pypi` environment
+  # protection rules -- neither of which is actually configured on this repo
+  # (verified via the GitHub API: only a branch ruleset exists, and the
+  # `pypi` environment's `protection_rules` is empty). Requiring
+  # `github.event_name == 'workflow_dispatch' && ... && github.actor ==
+  # github.repository_owner` closes that gap for dispatches of *this* file's
+  # current definition, without depending on those unconfigured,
+  # unauditable-from-this-repo settings: only the owner can trigger a manual
+  # dispatch, regardless of who else has write access or what tags they
+  # create. `release` events always fire with a tag ref too and are left
+  # unrestricted, so the normal release flow (cutting a GitHub Release) is
+  # unaffected.
+  #
+  # IMPORTANT CAVEAT: `workflow_dispatch` evaluates the workflow definition
+  # as it exists at the *dispatched ref*, not this file's current contents.
+  # A write collaborator can still tag (or author a new commit reverting to)
+  # an older revision of this file that predates this guard entirely --
+  # e.g. commit a70f721, which already set `environment: pypi` and
+  # `id-token: write` with a bare, unrestricted `workflow_dispatch` -- and
+  # dispatch against that ref to bypass this check completely. Closing that
+  # requires the `pypi` environment's required-reviewers protection rule
+  # (enforced by GitHub at the environment level for *any* workflow revision
+  # that references it) and/or a tag protection ruleset restricting who can
+  # create tags; this inline check is defense-in-depth only, not a
+  # substitute for configuring those.
   build:
     name: Build package
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' || github.ref_type == 'tag'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && github.actor == github.repository_owner)
     permissions:
       contents: read
     steps:

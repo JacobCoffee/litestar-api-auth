@@ -16,6 +16,22 @@ async def get_data() -> dict:
     return {"message": "Authenticated!"}
 ```
 
+### Revocation Timing
+
+Guards check the `APIKeyInfo` snapshot `APIKeyMiddleware` captured from a
+single backend lookup at the start of the request -- they do not query the
+backend again. Expiry is still evaluated live (the snapshotted `expires_at`
+is compared against the current time on every guard check), but `is_active`
+and `scopes` are copied from that one lookup and are not re-fetched.
+
+In practice this means: if a key is revoked, or has a scope removed, *while*
+a request using that key is already past `APIKeyMiddleware` and running
+through its guards/handler, that one in-flight request finishes using the
+pre-change snapshot. This is normal request-scoped caching, not a reusable
+bypass -- every request that starts *after* the change lands is rejected (or
+denied the removed scope) as expected, since it performs its own fresh
+backend lookup.
+
 ## Scope-Based Authorization
 
 Use `require_scope` for fine-grained access control:
