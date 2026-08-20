@@ -184,6 +184,11 @@ class APIAuthPlugin(InitPluginProtocol):
         # handler, rather than risk an unguarded handler silently shadowing
         # it depending on registration order.
         if self.config.route_handlers:
+            # Normalized here (rather than relying on _register_routes below
+            # to do it first, as this block used to) since this now runs
+            # ahead of that method.
+            if app_config.route_handlers is None:
+                app_config.route_handlers = []
             app_config.route_handlers.extend(self.config.route_handlers)
 
         # Register auto-routes if enabled

@@ -62,6 +62,14 @@ def get_api_key_info(connection: ASGIConnection) -> APIKeyInfo:
         :attr:`APIKeyInfo.has_valid_types`), and its ``is_active``/``is_expired``
         status, rather than assuming ``APIKeyMiddleware`` was the last writer.
 
+        This re-check is still against the request-scoped snapshot
+        ``APIKeyMiddleware`` stored, not a fresh backend lookup: ``is_active``
+        reflects the backend record as of that middleware's ``backend.get()``
+        call for *this* request, not any revocation that lands afterward.
+        See "Revocation timing" on :class:`APIKeyMiddleware
+        <litestar_api_auth.middleware.APIKeyMiddleware>` for the exact
+        semantics.
+
     Example:
         >>> from litestar import get, Request
         >>> from litestar_api_auth.guards import require_api_key, get_api_key_info

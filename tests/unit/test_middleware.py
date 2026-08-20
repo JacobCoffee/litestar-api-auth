@@ -665,3 +665,74 @@ class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedPostLookupError:
 
         assert frame_locals is not None, "traceback did not include APIKeyMiddleware._validate_api_key's frame"
         assert frame_locals.get("api_key") is None
+
+
+class TestRevocationTimingIsDocumented:
+    """Regression tests for the revocation-semantics finding.
+
+    Guards check the ``APIKeyInfo`` snapshot ``APIKeyMiddleware`` captured at
+    validation time, not the backend directly: a revoke()/scope change that
+    lands after this middleware's ``backend.get()`` call but before the
+    guard/handler for that same request finishes does not retroactively
+    affect that in-flight request. That is standard request-scoped snapshot
+    behavior, not a reusable bypass -- every request validated *after* the
+    revocation lands is rejected as usual -- but it was previously
+    undocumented, which risked API consumers assuming revocation takes effect
+    instantly against requests already past this middleware.
+
+    Before the fix, neither ``APIKeyMiddleware``'s nor
+    ``get_api_key_info``'s docstrings said anything about this timing, so a
+    reader had no way to learn the guarantee (or the lack of one) without
+    reading the implementation.
+    """
+
+    def test_middleware_docstring_documents_revocation_timing(self) -> None:
+        """``APIKeyMiddleware``'s docstring must disclose snapshot timing."""
+        doc = APIKeyMiddleware.__doc__ or ""
+        assert "Revocation timing" in doc
+        assert "backend.get()" in doc
+
+    def test_guard_docstring_documents_revocation_timing(self) -> None:
+        """``get_api_key_info``'s docstring must disclose snapshot timing."""
+        from litestar_api_auth.guards import get_api_key_info
+
+        doc = get_api_key_info.__doc__ or ""
+        assert "request-scoped snapshot" in doc
+
+    async def test_concurrent_revocation_does_not_affect_in_flight_snapshot(self) -> None:
+        """A revoke() that lands after backend.get() must not retroactively
+        change the ``APIKeyInfo`` already handed to this request.
+
+        Simulates the exact race from the finding: the raw key is validated
+        (as if by the middleware, mid-request) *before* a concurrent
+        request revokes it, and the already-obtained snapshot must still
+        report the pre-revocation ``is_active=True`` -- while validating the
+        *same* key again afterward (as a new request would) must now raise
+        ``APIKeyRevokedError``, proving revocation is enforced going forward.
+        """
+        backend = MemoryBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        # This request's middleware lookup happens first, mirroring
+        # backend.get() completing before the concurrent revoke() below.
+        in_flight_snapshot = await middleware._validate_api_key(raw_key)
+        assert in_flight_snapshot.is_active is True
+
+        # A concurrent request revokes the key while the first request is
+        # still mid-flight (e.g. inside a guard or handler).
+        revoked = await backend.revoke(key_hash)
+        assert revoked is True
+
+        # The snapshot already obtained by the in-flight request must be
+        # unaffected -- it is a copy, not a live view of the backend record.
+        assert in_flight_snapshot.is_active is True
+
+        # Any request validated after the revocation lands -- including a
+        # hypothetical retry of this same request -- must be rejected.
+        with pytest.raises(APIKeyRevokedError):
+            await middleware._validate_api_key(raw_key)

@@ -74,6 +74,20 @@ class APIKeyMiddleware(AbstractMiddleware):
     Guards can then check request.state.api_key to enforce authentication
     and authorization policies.
 
+    Revocation timing:
+        Guards check the ``APIKeyInfo`` snapshot this middleware captured at
+        validation time, not the backend itself. ``is_expired`` is recomputed
+        from ``expires_at`` against the current time on every guard check, so
+        expiry is always evaluated "live". ``is_active``, however, is a value
+        copied from the backend's response to a single ``backend.get()``
+        call: if a key is revoked (or has a scope removed) after that call
+        but before the guard/handler for *that same request* finishes
+        running, the in-flight request completes using the pre-revocation
+        snapshot. This is standard request-scoped caching, not a reusable
+        bypass -- every request validated after the revocation lands is
+        rejected as usual, since the next ``backend.get()`` sees the updated
+        record.
+
     Attributes:
         backend: The storage backend for API keys.
         header_name: The HTTP header name to extract the key from.
@@ -144,7 +158,11 @@ class APIKeyMiddleware(AbstractMiddleware):
         # Extract API key from headers
         api_key = self._extract_api_key(scope)
 
-        # If an API key is present, validate it and store in state
+        # If an API key is present, validate it and store in state. key_info
+        # is a snapshot as of this backend.get() call (see "Revocation
+        # timing" in the class docstring): a revoke()/scope change that lands
+        # after this call but before the guard/handler for this request
+        # finishes does not retroactively affect this in-flight request.
         if api_key:
             try:
                 key_info = await self._validate_api_key(api_key)
