@@ -7,7 +7,7 @@ revoking, and deleting API keys.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar
+from typing import Annotated, Any
 
 import msgspec
 from litestar import Controller, delete, get, post
@@ -17,9 +17,6 @@ from litestar.status_codes import HTTP_201_CREATED, HTTP_204_NO_CONTENT
 from litestar_api_auth.backends.base import APIKeyBackend
 from litestar_api_auth.guards import require_scope
 from litestar_api_auth.service import hash_api_key
-
-if TYPE_CHECKING:
-    from litestar.types import Guard
 
 __all__ = ["APIKeyController"]
 
@@ -72,9 +69,9 @@ class APIKeyController(Controller):
         ... )
     """
 
-    path: ClassVar[str] = "/api-keys"  # type: ignore[misc]
-    guards: ClassVar[list[Guard]] = [require_scope(DEFAULT_MANAGEMENT_SCOPE)]  # type: ignore[misc]
-    tags: ClassVar[list[str]] = ["API Keys"]  # type: ignore[misc]
+    path = "/api-keys"
+    guards = [require_scope(DEFAULT_MANAGEMENT_SCOPE)]
+    tags = ["API Keys"]
 
     @post(
         "/",

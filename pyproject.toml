@@ -339,6 +339,9 @@ max-complexity = 12
 "src/litestar_api_auth/controllers.py" = [
     "TC001",    # move-import (runtime needed)
     "DTZ003",   # datetime-utc (will be handled)
+    "RUF012",   # mutable-class-default (Controller.path/guards/tags are plain
+                # instance attributes upstream, not ClassVar -- annotating them
+                # here would be an invalid Liskov-unsound override per `ty`)
 ]
 "src/litestar_api_auth/exceptions.py" = [
     "ANN401",   # any-type (exceptions need flexible detail parameter)
