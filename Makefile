@@ -99,8 +99,10 @@ security: ## Run zizmor GitHub Actions security scanner
 	@echo "=> Running zizmor security scan on GitHub Actions workflows"
 	@uvx zizmor .github/workflows/
 
-audit: ## Run pip-audit against the locked dependencies
+audit: ## Run pip-audit against the locked dependencies (local interpreter only; CI matrixes both sides of uv.lock's marker split)
 	@echo "=> Auditing locked dependencies for known vulnerabilities"
+	@set -e
+	@trap 'rm -f requirements-audit.txt' EXIT
 	@$(UV) export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt > /dev/null
 	@uvx pip-audit -r requirements-audit.txt --desc
 	@rm -f requirements-audit.txt

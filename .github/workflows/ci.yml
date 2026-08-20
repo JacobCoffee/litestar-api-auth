@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   # ==================================================================================== #
-  # SECURITY SCAN (workflow security with zizmor, dependency audit with pip-audit)
+  # SECURITY SCAN (workflow security with zizmor)
   # ==================================================================================== #
   security:
     name: Security Scan
@@ -43,10 +43,41 @@ jobs:
         with:
           inputs: .github/workflows/
 
+  # ==================================================================================== #
+  # DEPENDENCY AUDIT (pip-audit against the locked, exported dependency set)
+  #
+  # uv.lock is a universal lock: several packages (e.g. sphinx) resolve to a
+  # different pinned version depending on the Python version, via a
+  # `python_full_version` marker. pip-audit resolves those markers against
+  # whichever interpreter it runs under, so a single Python version would
+  # silently skip auditing the other branch. The matrix below runs pip-audit
+  # once below and once at/above the "3.11" marker split used throughout
+  # uv.lock, so both pinned branches actually get scanned.
+  # ==================================================================================== #
+  dependency-audit:
+    name: Dependency Audit (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+
       - name: Set up uv
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
 
       - name: Export locked dependencies
         run: uv export --format requirements-txt --all-extras --no-emit-project --locked -o requirements-audit.txt
@@ -188,7 +219,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [security, validate, test-smoke, test-full]
+    needs: [security, dependency-audit, validate, test-smoke, test-full]
     if: always()
     permissions:
       contents: read
@@ -196,11 +227,12 @@ jobs:
       - name: Check CI results
         env:
           SECURITY_RESULT: ${{ needs.security.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency-audit.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           SMOKE_RESULT: ${{ needs.test-smoke.result }}
           FULL_RESULT: ${{ needs.test-full.result }}
         run: |
-          for result in "${SECURITY_RESULT}" "${VALIDATE_RESULT}" "${SMOKE_RESULT}" "${FULL_RESULT}"; do
+          for result in "${SECURITY_RESULT}" "${DEPENDENCY_AUDIT_RESULT}" "${VALIDATE_RESULT}" "${SMOKE_RESULT}" "${FULL_RESULT}"; do
             if [[ "${result}" != "success" ]]; then
               echo "CI failed! Result: ${result}"
               exit 1
