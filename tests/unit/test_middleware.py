@@ -54,6 +54,23 @@ def _find_middleware_frame_locals(tb: TracebackType | None) -> dict[str, Any] | 
     return None
 
 
+def _find_validate_api_key_frame_locals(tb: TracebackType | None) -> dict[str, Any] | None:
+    """Walk a traceback and return the locals of the
+    ``APIKeyMiddleware._validate_api_key`` frame, or None if no such frame is
+    found.
+
+    Matches on both the code object's name *and* ``self`` being the
+    middleware instance, for the same reason ``_find_middleware_frame_locals``
+    does.
+    """
+    while tb is not None:
+        frame = tb.tb_frame
+        if frame.f_code.co_name == "_validate_api_key" and isinstance(frame.f_locals.get("self"), APIKeyMiddleware):
+            return frame.f_locals
+        tb = tb.tb_next
+    return None
+
+
 async def _noop_receive() -> dict[str, Any]:
     return {"type": "http.request", "body": b"", "more_body": False}
 
@@ -487,3 +504,40 @@ class TestRawApiKeyScrubbedFromLocalsOnUnexpectedValidationError:
 
         assert frame_locals is not None, "traceback did not include APIKeyMiddleware.__call__'s frame"
         assert frame_locals.get("api_key") is None
+
+
+class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedBackendError:
+    """Regression test: an *unexpected* error raised by the backend while
+    ``_validate_api_key`` is on the stack must not leave the raw API key
+    reachable from ``_validate_api_key``'s own locals while it propagates.
+
+    Before the fix, ``__call__``'s ``BaseException`` handler only scrubbed
+    ``api_key``/``key_hash``/``key_info`` from its *own* frame. The inner
+    ``_validate_api_key`` frame -- still present in the traceback because it
+    is the one that actually awaited ``backend.get()`` -- kept the raw
+    ``api_key`` (and ``key_hash``) bound as its own locals, so a monitoring
+    tool capturing frame locals on the propagating exception (e.g. Sentry's
+    ``include_local_variables``) could recover the plaintext bearer key from
+    that inner frame even though the outer frame was clean.
+    """
+
+    async def test_raw_key_not_in_validate_api_key_locals_when_backend_raises_unexpectedly(self) -> None:
+        backend = _UnexpectedErrorOnGetBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(ConnectionError, match="backend connection dropped") as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_validate_api_key_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware._validate_api_key's frame"
+        assert frame_locals.get("api_key") is None
+        assert frame_locals.get("key_hash") is None
+        assert frame_locals.get("key_info") is None

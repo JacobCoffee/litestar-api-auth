@@ -247,7 +247,22 @@ class APIKeyMiddleware(AbstractMiddleware):
         key_hash = self._hash_api_key(api_key)
 
         # Look up the key in the backend
-        key_info = await self.backend.get(key_hash)
+        try:
+            key_info = await self.backend.get(key_hash)
+        except BaseException:
+            # An *unexpected* error here (a backend bug/outage) is about to
+            # propagate out of *this* frame while it still holds the raw
+            # api_key local. The scrubbing in __call__'s own BaseException
+            # handler only clears __call__'s frame, not this one, so a
+            # monitoring tool that captures frame locals on unhandled
+            # exceptions (e.g. Sentry's include_local_variables) could
+            # otherwise recover the plaintext bearer key straight from this
+            # frame's traceback entry. `del` (rather than assigning None) is
+            # used here because api_key is a `str`-typed parameter, not a
+            # plain local, so reassigning it to None would conflict with its
+            # declared type.
+            del api_key, key_hash
+            raise
 
         if key_info is None:
             raise APIKeyNotFoundError()
