@@ -541,3 +541,66 @@ class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedBackendError:
         assert frame_locals.get("api_key") is None
         assert frame_locals.get("key_hash") is None
         assert frame_locals.get("key_info") is None
+
+
+class _KeyInfoWithExplodingIsExpired:
+    """Stand-in for ``APIKeyInfo`` whose ``is_expired`` property raises
+    unexpectedly, simulating a bug in a backend's expiry-tracking data (e.g.
+    a corrupted or non-UTC ``expires_at`` value that a real backend's own
+    ``is_expired``-equivalent logic chokes on).
+
+    Deliberately duck-typed rather than a real ``APIKeyInfo`` instance, since
+    only the attributes ``_validate_api_key`` actually reads (``is_active``,
+    ``is_expired``, ``key_id``) need to be present.
+    """
+
+    is_active = True
+    key_id = "good"
+
+    @property
+    def is_expired(self) -> bool:
+        msg = "corrupted expiry data"
+        raise RuntimeError(msg)
+
+
+class _ExplodingIsExpiredBackend(MemoryBackend):
+    """A backend whose ``get()`` succeeds but returns a ``key_info`` whose
+    ``is_expired`` property raises, so the unexpected error happens *after*
+    the backend lookup, inside ``_validate_api_key``'s own validation checks.
+    """
+
+    async def get(self, key_hash: str) -> APIKeyInfo | None:
+        return _KeyInfoWithExplodingIsExpired()  # type: ignore[return-value]
+
+
+class TestRawApiKeyScrubbedFromValidateApiKeyLocalsOnUnexpectedPostLookupError:
+    """Regression test: an *unexpected* error raised by ``key_info.is_expired``
+    (i.e. after a successful backend lookup, not from ``backend.get()``
+    itself) must still not leave the raw API key reachable from
+    ``_validate_api_key``'s locals while it propagates.
+
+    A fix that only wrapped the ``backend.get()`` call in a scrub-on-except
+    handler (rather than deleting ``api_key`` as soon as it is hashed, before
+    the lookup) would still leave ``api_key`` bound in this frame for this
+    scenario, since the exception occurs after that ``try``/``except`` block
+    has already exited successfully.
+    """
+
+    async def test_raw_key_not_in_validate_api_key_locals_when_is_expired_raises_unexpectedly(self) -> None:
+        backend = _ExplodingIsExpiredBackend()
+        raw_key, key_hash = generate_api_key(prefix="test_")
+        await backend.create(
+            key_hash,
+            APIKeyInfo(key_id="good", key_hash=key_hash, name="Good", scopes=["read:users"]),
+        )
+        middleware = APIKeyMiddleware(app=_dummy_app, backend=backend)  # type: ignore[arg-type]
+
+        scope = _make_scope(headers=[(b"x-api-key", raw_key.encode())], stale_api_key=None)
+
+        with pytest.raises(RuntimeError, match="corrupted expiry data") as exc_info:
+            await middleware(scope, _noop_receive, _noop_send)  # type: ignore[arg-type]
+
+        frame_locals = _find_validate_api_key_frame_locals(exc_info.value.__traceback__)
+
+        assert frame_locals is not None, "traceback did not include APIKeyMiddleware._validate_api_key's frame"
+        assert frame_locals.get("api_key") is None

@@ -243,25 +243,27 @@ class APIKeyMiddleware(AbstractMiddleware):
             APIKeyRevokedError: If the key has been revoked.
             InvalidAPIKeyError: If the key format is invalid.
         """
-        # Hash the API key (backends store hashes, not plaintext)
+        # Hash the API key (backends store hashes, not plaintext), then drop
+        # the raw value immediately -- it is never read again in this
+        # function, and leaving it bound as a frame local would let a
+        # monitoring tool that captures frame locals on any exception below
+        # (backend.get() raising unexpectedly, or key_info.is_active/
+        # is_expired raising) recover the plaintext bearer key from this
+        # frame's traceback entry. __call__'s own BaseException handler only
+        # scrubs its *own* frame, not this one.
         key_hash = self._hash_api_key(api_key)
+        del api_key
 
         # Look up the key in the backend
         try:
             key_info = await self.backend.get(key_hash)
         except BaseException:
-            # An *unexpected* error here (a backend bug/outage) is about to
-            # propagate out of *this* frame while it still holds the raw
-            # api_key local. The scrubbing in __call__'s own BaseException
-            # handler only clears __call__'s frame, not this one, so a
-            # monitoring tool that captures frame locals on unhandled
-            # exceptions (e.g. Sentry's include_local_variables) could
-            # otherwise recover the plaintext bearer key straight from this
-            # frame's traceback entry. `del` (rather than assigning None) is
-            # used here because api_key is a `str`-typed parameter, not a
-            # plain local, so reassigning it to None would conflict with its
-            # declared type.
-            del api_key, key_hash
+            # Mirrors the scrub-on-BaseException pattern already used in
+            # __call__ and controllers.create_api_key: an unexpected backend
+            # error (bug/outage) is about to propagate out of this frame
+            # while it still holds key_hash -- scrub it too before it
+            # propagates.
+            key_hash = None
             raise
 
         if key_info is None:
