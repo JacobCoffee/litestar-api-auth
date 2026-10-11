@@ -9,7 +9,7 @@ jobs:
   # Scoped to read-only: this job runs the `uv_build` PEP 517 backend via
   # `uv build` and must not have access to the PyPI Trusted Publishing OIDC
   # token granted below to the publish-release job. `uv`'s pinned version
-  # (0.9.11) matches pyproject.toml's exact `uv_build==0.9.11` requirement,
+  # (0.12.23) matches pyproject.toml's exact `uv_build==0.12.23` requirement,
   # so uv uses its own bundled copy of the backend instead of fetching the
   # `uv_build` package from PyPI at build time -- keep these two versions in
   # lockstep so that stays true.
@@ -64,7 +64,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
-          version: "0.9.11"
+          version: "0.12.23"
 
       - name: Build package
         run: uv build

@@ -73,7 +73,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
-          version: "0.9.11"
+          version: "0.12.23"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -119,7 +119,7 @@ jobs:
         with:
           enable-cache: true
           prune-cache: false
-          version: "0.9.11"
+          version: "0.12.23"
 
       - name: Create virtual environment
         run: uv sync --all-extras --dev --locked
@@ -164,7 +164,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
-          version: "0.9.11"
+          version: "0.12.23"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
@@ -209,7 +209,7 @@ jobs:
         uses: astral-sh/setup-uv@681c641aba71e4a1c380be3ab5e12ad51f415867 # v7.1.6
         with:
           enable-cache: true
-          version: "0.9.11"
+          version: "0.12.23"
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
